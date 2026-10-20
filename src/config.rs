@@ -8,12 +8,23 @@ const FILE_NAME: &str = "config.yaml";
 pub struct Config {
     /// Human-readable key combination, e.g. "Ctrl + Shift".
     pub hotkey: String,
+    /// User-defined switching order; empty means the system order.
+    pub layouts: Vec<LayoutOrder>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayoutOrder {
+    /// Layout handle (HKL) as 8 hex digits, e.g. "04090409".
+    pub id: String,
+    /// Position in the list, starting from 1 at the top.
+    pub order: u32,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: "Alt + Shift".to_string(),
+            layouts: Vec::new(),
         }
     }
 }

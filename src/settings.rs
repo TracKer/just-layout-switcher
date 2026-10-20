@@ -1,6 +1,6 @@
 //! The settings window: a page list on the left, the selected page on the right.
 
-use crate::{config, hotkey_field, icon, ui};
+use crate::{config, hotkey_field, icon, layouts, reorder_list, ui};
 use std::cell::RefCell;
 use std::ptr::null_mut;
 use windows_sys::Win32::{
@@ -17,6 +17,7 @@ pub const APP_NAME: &str = "Just Layout Switcher";
 
 const ID_NAV: i32 = 100;
 const ID_HOTKEY: i32 = 101;
+const ID_LAYOUTS: i32 = 102;
 
 const CLIENT_W: i32 = 580;
 const CLIENT_H: i32 = 360;
@@ -28,21 +29,23 @@ const CONTENT_W: i32 = CLIENT_W - CONTENT_X - MARGIN;
 #[derive(Clone, Copy, PartialEq)]
 pub enum Page {
     General = 0,
-    About = 1,
+    Layouts = 1,
+    About = 2,
 }
 
 /// Static control style; not exposed by the enabled windows-sys features.
 const SS_NOPREFIX: u32 = 0x80;
 
-const PAGE_TITLES: [&str; 2] = ["General", "About"];
+const PAGE_TITLES: [&str; 3] = ["General", "Layouts", "About"];
 
 struct Settings {
     hwnd: HWND,
     nav: HWND,
     hotkey: HWND,
+    layouts: HWND,
     /// Static controls drawn in gray.
     secondary: Vec<HWND>,
-    pages: [Vec<HWND>; 2],
+    pages: [Vec<HWND>; 3],
     config: config::Config,
 }
 
@@ -103,6 +106,9 @@ pub fn destroy() {
 }
 
 fn show_page(index: usize) {
+    if index == Page::Layouts as usize {
+        refresh_layouts();
+    }
     SETTINGS.with_borrow(|s| {
         let Some(s) = s else { return };
         for (i, page) in s.pages.iter().enumerate() {
@@ -112,6 +118,19 @@ fn show_page(index: usize) {
             }
         }
     });
+}
+
+/// Reads the layouts from the system and sorts them as the config says.
+fn refresh_layouts() {
+    let Some((list, order)) = SETTINGS.with_borrow(|s| s.as_ref().map(|s| (s.layouts, s.config.layouts.clone())))
+    else {
+        return;
+    };
+    let items = layouts::apply_order(layouts::system(), &order)
+        .into_iter()
+        .map(|l| reorder_list::Item { id: l.id, text: l.name })
+        .collect();
+    reorder_list::set_items(list, items);
 }
 
 unsafe fn create() -> Option<Settings> {
@@ -168,6 +187,11 @@ unsafe fn create() -> Option<Settings> {
         132, 40, font,
     );
 
+    // Layouts
+    let layouts_title = label("Layouts", MARGIN, 36, title_font);
+    let layouts_label = label("Drag layouts to set the switching order:", 68, 20, font);
+    let layouts = child(reorder_list::CLASS_NAME, "", 0, 0, CONTENT_X, 92, CONTENT_W, 252, ID_LAYOUTS, font);
+
     // About
     let about_title = label(APP_NAME, MARGIN, 36, title_font);
     let version = label(&format!("Version {}", env!("CARGO_PKG_VERSION")), 56, 20, font);
@@ -179,13 +203,37 @@ unsafe fn create() -> Option<Settings> {
         hwnd,
         nav,
         hotkey,
+        layouts,
         secondary: vec![hotkey_hint, version, license],
         pages: [
             vec![general_title, hotkey_label, hotkey, hotkey_hint],
+            vec![layouts_title, layouts_label, layouts],
             vec![about_title, version, description, author, license],
         ],
         config: config::Config::default(),
     })
+}
+
+fn on_layouts_reordered(list: HWND) {
+    let order = reorder_list::ids(list)
+        .into_iter()
+        .zip(1..)
+        .map(|(id, order)| config::LayoutOrder { id, order })
+        .collect();
+    let result = SETTINGS.with_borrow_mut(|s| {
+        let s = s.as_mut()?;
+        s.config.layouts = order;
+        Some((s.hwnd, config::save(&s.config)))
+    });
+    if let Some((hwnd, Err(err))) = result {
+        show_save_error(hwnd, &err);
+    }
+}
+
+fn show_save_error(hwnd: HWND, err: &std::io::Error) {
+    let message = ui::wide(&format!("Failed to save {}:\n{err}", config::path().display()));
+    let caption = ui::wide(APP_NAME);
+    unsafe { MessageBoxW(hwnd, message.as_ptr(), caption.as_ptr(), MB_ICONERROR | MB_OK) };
 }
 
 fn on_hotkey_changed(hotkey: HWND) {
@@ -202,12 +250,7 @@ fn on_hotkey_changed(hotkey: HWND) {
     if let Some((hwnd, saved, Err(err))) = result {
         // Show what is actually in the config.
         ui::set_window_text(hotkey, &saved);
-        let message = ui::wide(&format!(
-            "Failed to save {}:\n{err}",
-            config::path().display()
-        ));
-        let caption = ui::wide(APP_NAME);
-        unsafe { MessageBoxW(hwnd, message.as_ptr(), caption.as_ptr(), MB_ICONERROR | MB_OK) };
+        show_save_error(hwnd, &err);
     }
 }
 
@@ -263,6 +306,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     }
                 }
                 (ID_HOTKEY, hotkey_field::HFN_CHANGED) => on_hotkey_changed(lparam as HWND),
+                (ID_LAYOUTS, reorder_list::RLN_CHANGED) => on_layouts_reordered(lparam as HWND),
                 _ => {}
             }
             0

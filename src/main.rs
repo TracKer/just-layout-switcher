@@ -4,6 +4,8 @@ mod config;
 mod hotkey_field;
 mod icon;
 mod keys;
+mod layouts;
+mod reorder_list;
 mod settings;
 mod ui;
 
@@ -41,6 +43,7 @@ fn main() {
         config::load(); // creates the default config file if missing
 
         hotkey_field::register();
+        reorder_list::register();
         settings::register();
         let Some(tray) = create_tray_window() else { return };
         add_tray_icon(tray);
