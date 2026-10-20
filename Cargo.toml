@@ -1,0 +1,30 @@
+[package]
+name = "just-layout-switcher"
+version = "0.1.0"
+edition = "2021"
+description = "Just layout switcher"
+license = "GPL-3.0-or-later"
+authors = ["Andrey Rudenko"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+
+[dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[profile.release]
+lto = true
+strip = true
