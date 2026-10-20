@@ -192,10 +192,16 @@ fn on_hotkey_changed(hotkey: HWND) {
     let text = ui::window_text(hotkey);
     let result = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut()?;
-        s.config.hotkey = text;
-        Some((s.hwnd, config::save(&s.config)))
+        let saved = std::mem::replace(&mut s.config.hotkey, text);
+        let result = config::save(&s.config);
+        if result.is_err() {
+            s.config.hotkey = saved;
+        }
+        Some((s.hwnd, s.config.hotkey.clone(), result))
     });
-    if let Some((hwnd, Err(err))) = result {
+    if let Some((hwnd, saved, Err(err))) = result {
+        // Show what is actually in the config.
+        ui::set_window_text(hotkey, &saved);
         let message = ui::wide(&format!(
             "Failed to save {}:\n{err}",
             config::path().display()
@@ -238,6 +244,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         WM_CLOSE => {
             // Keep the window around; the app lives in the tray.
             ShowWindow(hwnd, SW_HIDE);
+            0
+        }
+        WM_LBUTTONDOWN => {
+            // Clicks on the background or labels don't move focus by
+            // themselves; take it so the hotkey field cancels recording.
+            SetFocus(hwnd);
             0
         }
         WM_COMMAND => {
