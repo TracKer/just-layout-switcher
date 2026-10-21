@@ -1,6 +1,6 @@
 //! Per-layout options window, opened with the "more" button of a layout row.
-//! It sets the hotkey that switches straight to the layout; Save writes it to
-//! the config, Cancel drops the changes.
+//! It sets the hotkey that switches straight to the layout. Like on the
+//! General page, every change is saved to the config right away.
 
 use crate::{config::HotkeyOwner, hotkey_field, settings, ui};
 use std::cell::RefCell;
@@ -38,8 +38,9 @@ struct Dialog {
     hotkey_enabled: HWND,
     /// Static controls drawn in gray.
     secondary: Vec<HWND>,
-    /// The combination as last accepted; restored when a new one clashes.
-    accepted: String,
+    /// The combination and its on/off state as last saved; restored when a
+    /// new combination clashes or saving fails.
+    saved: (String, bool),
 }
 
 thread_local! {
@@ -70,7 +71,7 @@ fn hwnd() -> HWND {
         .unwrap_or(null_mut())
 }
 
-/// Lets the dialog handle Tab, Enter (Save) and Esc (Cancel).
+/// Lets the dialog handle Tab, Enter and Esc (both close it).
 pub fn is_dialog_message(msg: &MSG) -> bool {
     let hwnd = hwnd();
     !hwnd.is_null() && unsafe { IsDialogMessageW(hwnd, msg) } != 0
@@ -135,15 +136,9 @@ pub fn open(owner: HWND, id: &str, layout_name: &str) {
              a cleared one is removed.",
             SS_NOPREFIX, MARGIN, 80, CLIENT_W - 2 * MARGIN, 56, 0,
         );
-        let buttons_y = CLIENT_H - MARGIN - BUTTON_H;
-        let cancel_x = CLIENT_W - MARGIN - BUTTON_W;
-        let save = child(
-            "BUTTON", "Save", WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
-            cancel_x - 8 - BUTTON_W, buttons_y, BUTTON_W, BUTTON_H, IDOK,
-        );
-        child(
-            "BUTTON", "Cancel", WS_TABSTOP | BS_PUSHBUTTON as u32,
-            cancel_x, buttons_y, BUTTON_W, BUTTON_H, IDCANCEL,
+        let close = child(
+            "BUTTON", "Close", WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
+            CLIENT_W - MARGIN - BUTTON_W, CLIENT_H - MARGIN - BUTTON_H, BUTTON_W, BUTTON_H, IDCANCEL,
         );
         ui::set_checked(hotkey_enabled, enabled);
         EnableWindow(hotkey, enabled as BOOL);
@@ -155,13 +150,13 @@ pub fn open(owner: HWND, id: &str, layout_name: &str) {
                 hotkey,
                 hotkey_enabled,
                 secondary: vec![hint],
-                accepted: hotkey_text,
+                saved: (hotkey_text, enabled),
             })
         });
 
         EnableWindow(owner, 0);
         ShowWindow(hwnd, SW_SHOW);
-        SetFocus(save);
+        SetFocus(close);
     }
 }
 
@@ -173,55 +168,45 @@ fn close(hwnd: HWND) {
     }
 }
 
-/// Takes a newly recorded combination unless something else uses it already.
-fn on_hotkey_changed(hwnd: HWND) {
-    let Some((id, hotkey, accepted)) =
-        DIALOG.with_borrow(|d| d.as_ref().map(|d| (d.id.clone(), d.hotkey, d.accepted.clone())))
-    else {
-        return;
-    };
-    let text = ui::window_text(hotkey);
-    match settings::hotkey_clash(&text, &HotkeyOwner::Layout(id)) {
-        Some(message) => {
-            ui::set_window_text(hotkey, &accepted);
-            settings::show_hotkey_clash(hwnd, &message);
-        }
-        None => DIALOG.with_borrow_mut(|d| {
-            if let Some(d) = d {
-                d.accepted = text;
-            }
-        }),
-    }
-}
-
-fn on_save(hwnd: HWND) {
-    let Some((id, hotkey, enabled)) = DIALOG.with_borrow(|d| {
-        d.as_ref().map(|d| (d.id.clone(), d.accepted.clone(), ui::is_checked(d.hotkey_enabled)))
+/// Saves the combination and its on/off state as the controls show them.
+/// A combination that something else uses already is refused; on failure
+/// the controls go back to what is saved.
+fn save(hwnd: HWND) {
+    let Some((id, hotkey, hotkey_enabled, saved)) = DIALOG.with_borrow(|d| {
+        d.as_ref().map(|d| (d.id.clone(), d.hotkey, d.hotkey_enabled, d.saved.clone()))
     }) else {
         return;
     };
-    if settings::set_layout_hotkey(hwnd, &id, &hotkey, enabled) {
-        close(hwnd);
-    }
+    let text = ui::window_text(hotkey);
+    let enabled = ui::is_checked(hotkey_enabled);
+    let ok = match settings::hotkey_clash(&text, &HotkeyOwner::Layout(id.clone())) {
+        Some(message) => {
+            settings::show_hotkey_clash(hwnd, &message);
+            false
+        }
+        None => settings::set_layout_hotkey(hwnd, &id, &text, enabled),
+    };
+    let (text, enabled) = if ok { (text, enabled) } else { saved };
+    ui::set_window_text(hotkey, &text);
+    ui::set_checked(hotkey_enabled, enabled);
+    unsafe { EnableWindow(hotkey, enabled as BOOL) };
+    DIALOG.with_borrow_mut(|d| {
+        if let Some(d) = d {
+            d.saved = (text, enabled);
+        }
+    });
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_COMMAND => {
             match (ui::loword(wparam) as i32, ui::hiword(wparam)) {
-                (IDOK, _) => on_save(hwnd),
-                (IDCANCEL, _) => close(hwnd),
-                (ID_HOTKEY, hotkey_field::HFN_CHANGED) => on_hotkey_changed(hwnd),
+                (IDOK | IDCANCEL, _) => close(hwnd),
+                (ID_HOTKEY, hotkey_field::HFN_CHANGED) | (ID_HOTKEY_ENABLED, BN_CLICKED) => save(hwnd),
                 (ID_HOTKEY_CLEAR, BN_CLICKED) => {
                     if let Some(hotkey) = DIALOG.with_borrow(|d| d.as_ref().map(|d| d.hotkey)) {
                         ui::set_window_text(hotkey, "");
-                        on_hotkey_changed(hwnd);
-                    }
-                }
-                (ID_HOTKEY_ENABLED, BN_CLICKED) => {
-                    let enabled = ui::is_checked(lparam as HWND);
-                    if let Some(hotkey) = DIALOG.with_borrow(|d| d.as_ref().map(|d| d.hotkey)) {
-                        EnableWindow(hotkey, enabled as BOOL);
+                        save(hwnd);
                     }
                 }
                 _ => {}
