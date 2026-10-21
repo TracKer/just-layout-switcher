@@ -174,6 +174,13 @@ fn from_wide(buf: &[u16]) -> String {
     String::from_utf16_lossy(&buf[..len])
 }
 
+/// The `index`-th enabled layout in `list`, counting from 0 and wrapping
+/// around past the last one. `None` if no layout is enabled.
+pub fn nth_enabled(list: &[(u32, bool)], index: usize) -> Option<u32> {
+    let enabled: Vec<u32> = list.iter().filter(|&&(_, enabled)| enabled).map(|&(hkl, _)| hkl).collect();
+    (!enabled.is_empty()).then(|| enabled[index % enabled.len()])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +247,14 @@ mod tests {
     fn nothing_to_switch_to() {
         assert_eq!(next_enabled(&[(1, true), (2, false)], 1), None);
         assert_eq!(next_enabled(&[], 1), None);
+    }
+
+    #[test]
+    fn nth_counts_only_enabled_layouts_and_wraps() {
+        let list = [(1, true), (2, true), (3, false), (4, true), (5, true)];
+        let picked: Vec<_> = (0..5).map(|i| nth_enabled(&list, i).unwrap()).collect();
+        assert_eq!(picked, [1, 2, 4, 5, 1]);
+        assert_eq!(nth_enabled(&[(1, false)], 0), None);
     }
 
     #[test]

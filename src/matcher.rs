@@ -24,6 +24,9 @@ pub struct Outcome {
     /// The swallowed key-up has to be sent again after the mask key, so the
     /// system doesn't consider the key still held.
     pub replay: bool,
+    /// The hotkey fired again while its modifiers stayed held since the
+    /// previous time (Ctrl+Alt held, L tapped again).
+    pub continues: bool,
 }
 
 #[derive(Default)]
@@ -39,6 +42,8 @@ pub struct Matcher {
     swallowed: Vec<u32>,
     /// A modifier-only hotkey is held with nothing else pressed since.
     armed: bool,
+    /// A hotkey with an ordinary key fired and its modifiers are still held.
+    series: bool,
 }
 
 impl Matcher {
@@ -49,6 +54,7 @@ impl Matcher {
         self.on_release = self.hotkey.iter().all(|&vk| keys::is_modifier(vk));
         self.block = block;
         self.armed = false;
+        self.series = false;
     }
 
     pub fn has_hotkey(&self) -> bool {
@@ -65,6 +71,7 @@ impl Matcher {
         self.held.clear();
         self.swallowed.clear();
         self.armed = false;
+        self.series = false;
     }
 
     /// Drops keys that are no longer down although their key-up was missed
@@ -98,16 +105,21 @@ impl Matcher {
         if repeat || !matches || keys::is_modifier(keys::normalize(vk)) {
             return Outcome::default();
         }
+        let continues = std::mem::replace(&mut self.series, true);
         if !self.block {
-            return Outcome { fire: true, ..Default::default() };
+            return Outcome { fire: true, continues, ..Default::default() };
         }
         self.swallowed.push(vk);
         let mask = self.held_set().iter().any(|&k| k == keys::VK_ALT || k == keys::VK_WIN);
-        Outcome { fire: true, swallow: true, mask, replay: false }
+        Outcome { fire: true, swallow: true, mask, replay: false, continues }
     }
 
     pub fn key_up(&mut self, vk: u32) -> Outcome {
         self.held.retain(|&k| k != vk);
+        let normalized = keys::normalize(vk);
+        if keys::is_modifier(normalized) && !self.held_set().contains(&normalized) {
+            self.series = false;
+        }
         if let Some(pos) = self.swallowed.iter().position(|&k| k == vk) {
             self.swallowed.remove(pos);
             return Outcome { swallow: true, ..Default::default() };
@@ -119,7 +131,7 @@ impl Matcher {
         if !self.block {
             return Outcome { fire: true, ..Default::default() };
         }
-        Outcome { fire: true, swallow: true, mask: true, replay: true }
+        Outcome { fire: true, swallow: true, mask: true, replay: true, continues: false }
     }
 
     fn held_set(&self) -> Vec<u32> {
@@ -200,7 +212,7 @@ mod tests {
         let mut m = matcher("Alt + Shift", true);
         m.key_down(LALT);
         m.key_down(LSHIFT);
-        assert_eq!(m.key_up(LSHIFT), Outcome { fire: true, swallow: true, mask: true, replay: true });
+        assert_eq!(m.key_up(LSHIFT), Outcome { fire: true, swallow: true, mask: true, replay: true, continues: false });
         assert_eq!(m.key_up(LALT), Outcome::default());
     }
 
@@ -215,6 +227,32 @@ mod tests {
         assert!(fired(m.key_down(L)));
         m.key_up(L);
         assert!(!fired(m.key_up(LALT)));
+    }
+
+    #[test]
+    fn key_hotkey_continues_while_modifiers_are_held() {
+        let mut m = matcher("Ctrl + Alt + L", false);
+        m.key_down(LCTRL);
+        m.key_down(LALT);
+        assert!(!m.key_down(L).continues);
+        m.key_up(L);
+        assert!(m.key_down(L).continues);
+        m.key_up(L);
+        m.key_up(LALT);
+        m.key_down(LALT);
+        let o = m.key_down(L);
+        assert!(o.fire && !o.continues);
+    }
+
+    #[test]
+    fn modifier_hotkey_never_continues() {
+        let mut m = matcher("Alt + Shift", false);
+        for _ in 0..2 {
+            m.key_down(LALT);
+            m.key_down(LSHIFT);
+            assert!(!m.key_up(LSHIFT).continues);
+            m.key_up(LALT);
+        }
     }
 
     #[test]
@@ -233,7 +271,7 @@ mod tests {
         let mut m = matcher("Ctrl + Alt + L", true);
         m.key_down(LCTRL);
         m.key_down(LALT);
-        assert_eq!(m.key_down(L), Outcome { fire: true, swallow: true, mask: true, replay: false });
+        assert_eq!(m.key_down(L), Outcome { fire: true, swallow: true, mask: true, replay: false, continues: false });
         assert_eq!(m.key_down(L), Outcome { swallow: true, ..Default::default() });
         assert_eq!(m.key_up(L), Outcome { swallow: true, ..Default::default() });
         assert_eq!(m.key_up(LALT), Outcome::default());
@@ -243,7 +281,7 @@ mod tests {
     fn blocked_key_hotkey_without_alt_or_win_needs_no_mask() {
         let mut m = matcher("Ctrl + L", true);
         m.key_down(LCTRL);
-        assert_eq!(m.key_down(L), Outcome { fire: true, swallow: true, mask: false, replay: false });
+        assert_eq!(m.key_down(L), Outcome { fire: true, swallow: true, mask: false, replay: false, continues: false });
     }
 
     #[test]

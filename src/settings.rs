@@ -199,8 +199,8 @@ unsafe fn create() -> Option<Settings> {
         // The group starts at the first button: Tab lands on the checked one,
         // the arrow keys move between them.
         let mut style = if i == 0 { WS_TABSTOP | WS_GROUP } else { 0 };
-        // TODO: enable the other modes once they are implemented.
-        if MODES[i].0 != config::SwitchMode::Cycle {
+        // TODO: enable the per-layout mode once it is implemented.
+        if MODES[i].0 == config::SwitchMode::PerLayout {
             style |= WS_DISABLED;
         }
         let y = 92 + 26 * i as i32;

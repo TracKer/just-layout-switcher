@@ -24,8 +24,8 @@ pub enum SwitchMode {
     /// Each press switches to the next layout, wrapping from the last to the first.
     #[default]
     Cycle,
-    /// N presses in a row switch to the N-th enabled layout.
-    /// TODO: not implemented yet.
+    /// N presses in a row switch to the N-th enabled layout; every press
+    /// switches right away, a pause starts counting over.
     PressCount,
     /// Every layout has its own hotkey, set in its options dialog ("..." in
     /// the Layouts list); the common hotkey is unused.

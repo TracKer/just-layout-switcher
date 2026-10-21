@@ -21,6 +21,7 @@ use windows_sys::Win32::{
 };
 
 const CLASS_NAME: &str = "JlsSwitcher";
+/// wParam: 1 if the hotkey fired with its modifiers held since the last time.
 const WM_SWITCH: u32 = WM_APP + 20;
 /// wParam: vk of a key-up to replay after the mask (0 for none);
 /// lParam: its scan code, bit 16 set for an extended key.
@@ -34,6 +35,9 @@ const VK_MASK: u16 = 0xE8;
 /// How long a requested layout is assumed to be the current one while the
 /// target window hasn't processed the request yet.
 const PENDING_MS: u32 = 500;
+/// In the press-count mode, a press within this time after the previous one
+/// goes on to the next layout; after a longer pause counting starts over.
+const SERIES_MS: u32 = 1000;
 
 struct Switcher {
     window: HWND,
@@ -43,6 +47,8 @@ struct Switcher {
     config: config::Config,
     /// The last requested layout: (GUI thread, HKL, tick).
     pending: Option<(u32, u32, u32)>,
+    /// Press-count mode: index of the last pressed layout and when.
+    series: Option<(usize, u32)>,
 }
 
 thread_local! {
@@ -53,6 +59,7 @@ thread_local! {
         matcher: Matcher::default(),
         config: config::Config::default(),
         pending: None,
+        series: None,
     });
 }
 
@@ -86,11 +93,12 @@ pub fn start(config: &config::Config) {
 
 /// Picks up a changed config.
 pub fn apply(config: &config::Config) {
-    // Only the first mode is implemented so far.
-    let active = config.switch_mode == config::SwitchMode::Cycle;
+    // TODO: the per-layout mode is not implemented yet.
+    let active = config.switch_mode != config::SwitchMode::PerLayout;
     let hotkey = active.then(|| keys::parse(&config.hotkey)).flatten();
     let need_mouse = SWITCHER.with_borrow_mut(|s| {
         s.config = config.clone();
+        s.series = None;
         s.matcher.set(hotkey, config.block_hotkey);
         s.matcher.fires_on_release()
     });
@@ -163,7 +171,7 @@ fn handle_key(kb: &KBDLLHOOKSTRUCT) -> bool {
 
     unsafe {
         if outcome.fire {
-            PostMessageW(window, WM_SWITCH, 0, 0);
+            PostMessageW(window, WM_SWITCH, outcome.continues as WPARAM, 0);
         }
         if outcome.mask {
             let (vk, scan) = if outcome.replay {
@@ -210,8 +218,9 @@ unsafe fn send_mask(replay_vk: u16, replay_scan: u32) {
     SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
 }
 
-/// Switches the foreground application to the next enabled layout.
-unsafe fn switch_layout() {
+/// Switches the foreground application to the layout picked by the mode:
+/// the next enabled one, or the N-th enabled one for the N-th press in a row.
+unsafe fn switch_layout(continues: bool) {
     let foreground = GetForegroundWindow();
     if foreground.is_null() {
         return;
@@ -220,16 +229,30 @@ unsafe fn switch_layout() {
     let actual = GetKeyboardLayout(thread) as usize as u32;
     let now = GetTickCount();
 
-    let (current, order) = SWITCHER.with_borrow(|s| {
-        // Quick repeated presses may come before the window has processed
-        // the previous request; continue from what was requested then.
-        let current = match s.pending {
-            Some((t, hkl, tick)) if t == thread && hkl != actual && now.wrapping_sub(tick) < PENDING_MS => hkl,
-            _ => actual,
-        };
-        (current, s.config.layouts.clone())
+    let next = SWITCHER.with_borrow_mut(|s| {
+        let list = layouts::switch_order(&s.config.layouts);
+        match s.config.switch_mode {
+            config::SwitchMode::PressCount => {
+                let index = match s.series {
+                    Some((last, tick)) if continues || now.wrapping_sub(tick) < SERIES_MS => last + 1,
+                    _ => 0,
+                };
+                s.series = Some((index, now));
+                layouts::nth_enabled(&list, index)
+            }
+            _ => {
+                // Quick repeated presses may come before the window has
+                // processed the previous request; go on from what was
+                // requested then.
+                let current = match s.pending {
+                    Some((t, hkl, tick)) if t == thread && hkl != actual && now.wrapping_sub(tick) < PENDING_MS => hkl,
+                    _ => actual,
+                };
+                layouts::next_enabled(&list, current)
+            }
+        }
     });
-    let Some(next) = layouts::next_enabled(&layouts::switch_order(&order), current) else { return };
+    let Some(next) = next else { return };
 
     // The focused control's window gets the request, like with the system
     // hotkey; fall back to the active and the foreground window.
@@ -248,7 +271,7 @@ unsafe fn switch_layout() {
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_SWITCH => {
-            switch_layout();
+            switch_layout(wparam != 0);
             0
         }
         WM_MASK => {
