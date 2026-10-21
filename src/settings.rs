@@ -197,7 +197,11 @@ unsafe fn create() -> Option<Settings> {
     let modes: [HWND; 3] = std::array::from_fn(|i| {
         // The group starts at the first button: Tab lands on the checked one,
         // the arrow keys move between them.
-        let style = if i == 0 { WS_TABSTOP | WS_GROUP } else { 0 };
+        let mut style = if i == 0 { WS_TABSTOP | WS_GROUP } else { 0 };
+        // TODO: enable the other modes once they are implemented.
+        if MODES[i].0 != config::SwitchMode::Cycle {
+            style |= WS_DISABLED;
+        }
         let y = 92 + 26 * i as i32;
         child("BUTTON", MODES[i].1, style | BS_AUTORADIOBUTTON as u32, 0, CONTENT_X, y, CONTENT_W, 24, ID_MODE_FIRST + i as i32, font)
     });
