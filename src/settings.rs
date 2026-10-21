@@ -1,6 +1,6 @@
 //! The settings window: a page list on the left, the selected page on the right.
 
-use crate::{config, hotkey_field, icon, layout_dialog, layouts, reorder_list, ui};
+use crate::{config, hotkey_field, icon, layout_dialog, layouts, reorder_list, switcher, ui};
 use std::cell::RefCell;
 use std::ptr::null_mut;
 use windows_sys::Win32::{
@@ -92,6 +92,7 @@ pub fn open(page: Page) {
 
     // Pick up manual edits of the config file.
     let config = config::load();
+    switcher::apply(&config);
     let (hwnd, nav, modes, hotkey, block_hotkey) = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut().unwrap();
         s.config = config.clone();
@@ -265,11 +266,18 @@ fn on_layouts_changed(list: HWND) {
     let result = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut()?;
         s.config.layouts = order;
-        Some((s.hwnd, config::save(&s.config)))
+        Some((s.hwnd, save(&s.config)))
     });
     if let Some((hwnd, Err(err))) = result {
         show_save_error(hwnd, &err);
     }
+}
+
+/// Saves the config and makes the hotkey use it.
+fn save(config: &config::Config) -> std::io::Result<()> {
+    config::save(config)?;
+    switcher::apply(config);
+    Ok(())
 }
 
 fn show_save_error(hwnd: HWND, err: &std::io::Error) {
@@ -283,7 +291,7 @@ fn on_hotkey_changed(hotkey: HWND) {
     let result = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut()?;
         let saved = std::mem::replace(&mut s.config.hotkey, text);
-        let result = config::save(&s.config);
+        let result = save(&s.config);
         if result.is_err() {
             s.config.hotkey = saved;
         }
@@ -310,7 +318,7 @@ fn on_mode_changed(index: usize) {
     let result = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut()?;
         let saved = std::mem::replace(&mut s.config.switch_mode, mode);
-        let result = config::save(&s.config);
+        let result = save(&s.config);
         if result.is_err() {
             s.config.switch_mode = saved;
         }
@@ -329,7 +337,7 @@ fn on_block_hotkey_changed(checkbox: HWND) {
     let result = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut()?;
         s.config.block_hotkey = block;
-        let result = config::save(&s.config);
+        let result = save(&s.config);
         if result.is_err() {
             s.config.block_hotkey = !block;
         }

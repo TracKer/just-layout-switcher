@@ -6,8 +6,10 @@ mod icon;
 mod keys;
 mod layout_dialog;
 mod layouts;
+mod matcher;
 mod reorder_list;
 mod settings;
+mod switcher;
 mod ui;
 
 use settings::Page;
@@ -41,7 +43,7 @@ fn main() {
 
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
         ui::init_dpi();
-        config::load(); // creates the default config file if missing
+        let config = config::load(); // creates the default config file if missing
 
         ui::enable_visual_styles();
         hotkey_field::register();
@@ -50,6 +52,7 @@ fn main() {
         settings::register();
         let Some(tray) = create_tray_window() else { return };
         add_tray_icon(tray);
+        switcher::start(&config);
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
@@ -134,6 +137,7 @@ unsafe fn show_tray_menu(hwnd: HWND) {
         ID_SETTINGS => settings::open(Page::General),
         ID_ABOUT => settings::open(Page::About),
         ID_EXIT => {
+            switcher::stop();
             settings::destroy();
             DestroyWindow(hwnd);
         }

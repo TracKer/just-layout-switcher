@@ -77,6 +77,11 @@ pub fn register() {
     }
 }
 
+/// True while a combination is being recorded or its keys are still held.
+pub fn is_capturing() -> bool {
+    REC.try_with(|r| r.try_borrow().map_or(true, |r| r.phase != Phase::Idle)).unwrap_or(false)
+}
+
 fn is_recording(hwnd: HWND) -> bool {
     REC.with_borrow(|r| r.field == hwnd && r.phase == Phase::Recording)
 }

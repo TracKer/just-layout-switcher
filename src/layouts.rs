@@ -20,22 +20,45 @@ pub struct Layout {
 
 /// Layouts the user can switch between, in the system order.
 pub fn system() -> Vec<Layout> {
+    installed()
+        .into_iter()
+        .map(|hkl| Layout { id: format!("{hkl:08X}"), name: display_name(hkl), enabled: true })
+        .collect()
+}
+
+/// Installed layouts as HKL values, in the system order.
+fn installed() -> Vec<u32> {
     unsafe {
         let count = GetKeyboardLayoutList(0, null_mut());
         let mut hkls = vec![null_mut(); count.max(0) as usize];
         let count = GetKeyboardLayoutList(hkls.len() as i32, hkls.as_mut_ptr());
         hkls.truncate(count.max(0) as usize);
-        hkls.into_iter()
-            .map(|hkl| {
-                let hkl = hkl as usize as u32;
-                Layout {
-                    id: format!("{hkl:08X}"),
-                    name: display_name(hkl),
-                    enabled: true,
-                }
-            })
-            .collect()
+        hkls.into_iter().map(|hkl| hkl as usize as u32).collect()
     }
+}
+
+/// Installed layouts in the configured switching order with their enabled
+/// state. Cheaper than `system` + `apply_order`: no display names are read.
+pub fn switch_order(order: &[LayoutOrder]) -> Vec<(u32, bool)> {
+    let layouts = installed()
+        .into_iter()
+        .map(|hkl| Layout { id: format!("{hkl:08X}"), name: String::new(), enabled: true })
+        .collect();
+    apply_order(layouts, order)
+        .into_iter()
+        .filter_map(|l| Some((u32::from_str_radix(&l.id, 16).ok()?, l.enabled)))
+        .collect()
+}
+
+/// The first enabled layout after `current` in `list`, wrapping around.
+/// Disabled layouts are skipped; if `current` is not in the list, the first
+/// enabled layout is picked. `None` if there is nothing to switch to.
+pub fn next_enabled(list: &[(u32, bool)], current: u32) -> Option<u32> {
+    let start = list.iter().position(|&(hkl, _)| hkl == current).map_or(0, |i| i + 1);
+    (0..list.len())
+        .map(|i| list[(start + i) % list.len()])
+        .find(|&(hkl, enabled)| enabled && hkl != current)
+        .map(|(hkl, _)| hkl)
 }
 
 /// Sorts layouts by the configured order and applies their enabled state.
@@ -190,6 +213,33 @@ mod tests {
         );
         let enabled: Vec<_> = sorted.iter().map(|l| (l.id.as_str(), l.enabled)).collect();
         assert_eq!(enabled, [("A", false), ("B", true)]);
+    }
+
+    #[test]
+    fn next_goes_down_the_list_and_wraps() {
+        let list = [(1, true), (2, true), (3, true)];
+        assert_eq!(next_enabled(&list, 1), Some(2));
+        assert_eq!(next_enabled(&list, 3), Some(1));
+    }
+
+    #[test]
+    fn next_skips_disabled_layouts() {
+        let list = [(1, true), (2, false), (3, true), (4, false)];
+        assert_eq!(next_enabled(&list, 1), Some(3));
+        assert_eq!(next_enabled(&list, 3), Some(1));
+        // Switched to a disabled layout some other way: go on from its place.
+        assert_eq!(next_enabled(&list, 2), Some(3));
+    }
+
+    #[test]
+    fn next_from_unknown_layout_is_the_first_enabled() {
+        assert_eq!(next_enabled(&[(1, false), (2, true)], 9), Some(2));
+    }
+
+    #[test]
+    fn nothing_to_switch_to() {
+        assert_eq!(next_enabled(&[(1, true), (2, false)], 1), None);
+        assert_eq!(next_enabled(&[], 1), None);
     }
 
     #[test]

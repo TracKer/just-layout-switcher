@@ -22,6 +22,35 @@ fn modifier_rank(vk: u32) -> Option<u8> {
     }
 }
 
+pub const VK_ALT: u32 = VK_MENU as u32;
+pub const VK_WIN: u32 = VK_LWIN as u32;
+
+pub fn is_modifier(vk: u32) -> bool {
+    modifier_rank(vk).is_some()
+}
+
+/// Parses a combination produced by `format` back into normalized virtual
+/// keys, sorted. `None` if it is empty or has a key name we don't know.
+pub fn parse(text: &str) -> Option<Vec<u32>> {
+    let mut vks = text
+        .split(" + ")
+        .map(|part| vk_by_name(part.trim()))
+        .collect::<Option<Vec<_>>>()?;
+    vks.sort_unstable();
+    vks.dedup();
+    (!vks.is_empty()).then_some(vks)
+}
+
+fn vk_by_name(text: &str) -> Option<u32> {
+    if text.is_empty() {
+        return None;
+    }
+    (1..=254u32).filter(|&vk| normalize(vk) == vk).find(|&vk| {
+        let scan = unsafe { MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) };
+        name(vk, scan, false) == text || name(vk, scan, true) == text
+    })
+}
+
 /// Display name of a normalized virtual key. `scan` and `extended` come from
 /// the keyboard hook and are used for keys without a well-known name.
 pub fn name(vk: u32, scan: u32, extended: bool) -> String {
@@ -132,6 +161,21 @@ mod tests {
     fn other_keys_keep_press_order() {
         let keys = [key(VK_CONTROL), key(VK_F5), key(b'1' as u16)];
         assert_eq!(format(&keys), "Ctrl + F5 + 1");
+    }
+
+    #[test]
+    fn parse_reverses_format() {
+        let keys = [key(VK_CONTROL), key(VK_MENU), key(b'L' as u16)];
+        let mut expected = vec![VK_CONTROL as u32, VK_MENU as u32, b'L' as u32];
+        expected.sort_unstable();
+        assert_eq!(parse(&format(&keys)), Some(expected));
+        assert_eq!(parse("Alt + Shift"), Some(vec![VK_SHIFT as u32, VK_MENU as u32]));
+    }
+
+    #[test]
+    fn parse_rejects_empty_and_unknown() {
+        assert_eq!(parse(""), None);
+        assert_eq!(parse("Ctrl + NoSuchKey"), None);
     }
 
     #[test]
