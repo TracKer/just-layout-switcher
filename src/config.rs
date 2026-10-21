@@ -27,8 +27,8 @@ pub enum SwitchMode {
     /// N presses in a row switch to the N-th enabled layout; every press
     /// switches right away, a pause starts counting over.
     PressCount,
-    /// Every layout has its own hotkey that switches straight to it, set in
-    /// its options dialog ("..." in the Layouts list); the common hotkey is unused.
+    /// Only the layouts' own hotkeys (set in their options dialog, "..." in
+    /// the Layouts list) switch; the common hotkey is unused.
     PerLayout,
 }
 
@@ -42,7 +42,7 @@ pub struct LayoutOrder {
     /// counting presses.
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
-    /// Switches straight to this layout in the per-layout mode; empty if none.
+    /// Switches straight to this layout in every mode; empty if none.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hotkey: String,
     /// A turned off hotkey is kept but not tracked.

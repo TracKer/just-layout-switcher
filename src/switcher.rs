@@ -120,25 +120,23 @@ pub fn apply(config: &config::Config) {
     set_mouse_hook(need_mouse);
 }
 
-/// The hotkeys tracked in the configured mode and what each one does.
+/// The tracked hotkeys and what each one does: the common hotkey as the mode
+/// says, plus the layouts' own hotkeys in every mode.
 fn hotkeys(config: &config::Config) -> (Vec<Vec<u32>>, Vec<Action>) {
-    match config.switch_mode {
-        config::SwitchMode::Cycle => keys::parse(&config.hotkey).map(|k| (k, Action::Cycle)).into_iter().unzip(),
-        config::SwitchMode::PressCount => {
-            keys::parse(&config.hotkey).map(|k| (k, Action::PressCount)).into_iter().unzip()
-        }
-        // A layout's own hotkey works even if the layout is left out of
-        // the cycle; only turning the hotkey itself off stops it.
-        config::SwitchMode::PerLayout => config
-            .layouts
-            .iter()
-            .filter(|l| l.hotkey_enabled)
-            .filter_map(|l| {
-                let hkl = u32::from_str_radix(&l.id, 16).ok()?;
-                Some((keys::parse(&l.hotkey)?, Action::Layout(hkl)))
-            })
-            .unzip(),
+    let main = match config.switch_mode {
+        config::SwitchMode::Cycle => Some(Action::Cycle),
+        config::SwitchMode::PressCount => Some(Action::PressCount),
+        config::SwitchMode::PerLayout => None,
     }
+    .and_then(|action| Some((keys::parse(&config.hotkey)?, action)));
+
+    // A layout's own hotkey works even if the layout is left out of the
+    // cycle; only turning the hotkey itself off stops it.
+    let own = config.layouts.iter().filter(|l| l.hotkey_enabled).filter_map(|l| {
+        let hkl = u32::from_str_radix(&l.id, 16).ok()?;
+        Some((keys::parse(&l.hotkey)?, Action::Layout(hkl)))
+    });
+    main.into_iter().chain(own).unzip()
 }
 
 pub fn stop() {

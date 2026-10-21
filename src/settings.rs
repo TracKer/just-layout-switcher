@@ -27,7 +27,7 @@ const ID_MODE_LAST: i32 = ID_MODE_FIRST + MODES.len() as i32 - 1;
 const MODES: [(config::SwitchMode, &str); 3] = [
     (config::SwitchMode::Cycle, "Switch to the next layout on each press"),
     (config::SwitchMode::PressCount, "Press once for the first layout, twice for the second, and so on"),
-    (config::SwitchMode::PerLayout, "Use a separate hotkey for each layout (set in the Layouts list)"),
+    (config::SwitchMode::PerLayout, "Use only the hotkeys of the layouts (set in the Layouts list)"),
 ];
 
 const CLIENT_W: i32 = 580;

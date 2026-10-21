@@ -129,8 +129,8 @@ pub fn open(owner: HWND, id: &str, layout_name: &str) {
         );
         let hint = child(
             "STATIC",
-            "Switches straight to this layout when the switching mode is \
-             \u{201C}Use a separate hotkey for each layout\u{201D}. \
+            "Switches straight to this layout in any switching mode, \
+             even if the layout is unchecked in the list. \
              A turned off hotkey is kept but not tracked; \
              a cleared one is removed.",
             SS_NOPREFIX, MARGIN, 80, CLIENT_W - 2 * MARGIN, 56, 0,
