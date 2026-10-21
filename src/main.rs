@@ -135,7 +135,7 @@ unsafe fn show_tray_menu(hwnd: HWND) {
     DestroyMenu(menu);
 
     match cmd as usize {
-        ID_SETTINGS => settings::open(Page::General),
+        ID_SETTINGS => settings::open(Page::Switcher),
         ID_ABOUT => settings::open(Page::About),
         ID_EXIT => {
             switcher::stop();
@@ -151,7 +151,7 @@ unsafe extern "system" fn tray_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
         WM_TRAY => {
             match lparam as u32 {
                 WM_RBUTTONUP => show_tray_menu(hwnd),
-                WM_LBUTTONDBLCLK => settings::open(Page::General),
+                WM_LBUTTONDBLCLK => settings::open(Page::Switcher),
                 _ => {}
             }
             0

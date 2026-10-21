@@ -9,7 +9,7 @@ pub struct Config {
     pub switch_mode: SwitchMode,
     /// Human-readable key combination, e.g. "Ctrl + Shift".
     pub hotkey: String,
-    /// Swallow the hotkey after switching instead of passing it on to the
+    /// Swallow a hotkey after its action instead of passing it on to the
     /// focused application and other hooks.
     pub block_hotkey: bool,
     /// Retypes the last word in the next layout; empty if none.
@@ -30,7 +30,7 @@ pub enum SwitchMode {
     /// switches right away, a pause starts counting over.
     PressCount,
     /// Only the layouts' own hotkeys (set in their options dialog, "..." in
-    /// the Layouts list) switch; the common hotkey is unused.
+    /// the list on the Layouts page) switch; the common hotkey is unused.
     PerLayout,
 }
 
@@ -69,7 +69,7 @@ fn is_true(value: &bool) -> bool {
 /// What a hotkey is assigned to.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HotkeyOwner {
-    /// The common hotkey on the General page.
+    /// The common hotkey on the Switcher page.
     Main,
     /// The hotkey of the layout with this id.
     Layout(String),

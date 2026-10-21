@@ -29,7 +29,7 @@ const ID_MODE_LAST: i32 = ID_MODE_FIRST + MODES.len() as i32 - 1;
 const MODES: [(config::SwitchMode, &str); 3] = [
     (config::SwitchMode::Cycle, "Switch to the next layout on each press"),
     (config::SwitchMode::PressCount, "Press once for the first layout, twice for the second, and so on"),
-    (config::SwitchMode::PerLayout, "Use only the hotkeys of the layouts (set in the Layouts list)"),
+    (config::SwitchMode::PerLayout, "Use only the hotkeys of the layouts (set in the list on the Layouts page)"),
 ];
 
 const RECORD_HINT: &str = "Click the field and press a new key combination. \
@@ -44,17 +44,19 @@ const CONTENT_W: i32 = CLIENT_W - CONTENT_X - MARGIN;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Page {
-    General = 0,
+    Switcher = 0,
     Layouts = 1,
     #[allow(dead_code)] // Opened from the page list only.
     Correction = 2,
-    About = 3,
+    #[allow(dead_code)] // Opened from the page list only.
+    Advanced = 3,
+    About = 4,
 }
 
 /// Static control style; not exposed by the enabled windows-sys features.
 const SS_NOPREFIX: u32 = 0x80;
 
-const PAGE_TITLES: [&str; 4] = ["General", "Layouts", "Correction", "About"];
+const PAGE_TITLES: [&str; 5] = ["Switcher", "Layouts", "Correction", "Advanced", "About"];
 
 struct Settings {
     hwnd: HWND,
@@ -66,7 +68,7 @@ struct Settings {
     correction_hotkey: HWND,
     /// Static controls drawn in gray.
     secondary: Vec<HWND>,
-    pages: [Vec<HWND>; 4],
+    pages: [Vec<HWND>; 5],
     config: config::Config,
 }
 
@@ -202,8 +204,8 @@ unsafe fn create() -> Option<Settings> {
         SendMessageW(nav, LB_ADDSTRING, 0, text.as_ptr() as LPARAM);
     }
 
-    // General
-    let general_title = label("General", MARGIN, 36, title_font);
+    // Switcher
+    let switcher_title = label("Switcher", MARGIN, 36, title_font);
     let mode_label = label("Switching mode:", 68, 20, font);
     let modes: [HWND; 3] = std::array::from_fn(|i| {
         // The group starts at the first button: Tab lands on the checked one,
@@ -213,6 +215,7 @@ unsafe fn create() -> Option<Settings> {
         child("BUTTON", MODES[i].1, style | BS_AUTORADIOBUTTON as u32, 0, CONTENT_X, y, CONTENT_W, 24, ID_MODE_FIRST + i as i32, font)
     });
     let hotkey_label = label("Layout switch hotkey:", 180, 20, font);
+    // WS_GROUP ends the group of the radio buttons.
     let hotkey = child(
         hotkey_field::CLASS_NAME, "", WS_TABSTOP | WS_GROUP, 0, CONTENT_X, 204, 260, 30, ID_HOTKEY, font,
     );
@@ -220,18 +223,9 @@ unsafe fn create() -> Option<Settings> {
         "BUTTON", "Clear", WS_TABSTOP | BS_PUSHBUTTON as u32, 0, CONTENT_X + 268, 204, 80, 30, ID_HOTKEY_CLEAR, font,
     );
     let hotkey_hint = label(RECORD_HINT, 244, 40, font);
-    let block_hotkey = child(
-        "BUTTON", "Block the hotkey after switching",
-        WS_TABSTOP | BS_AUTOCHECKBOX as u32, 0, CONTENT_X, 292, CONTENT_W, 24, ID_BLOCK_HOTKEY, font,
-    );
-    let block_hotkey_hint = label(
-        "When on, the key combination is not passed on to the active application. \
-         When off, it is passed on after switching.",
-        320, 40, font,
-    );
 
     // Layouts
-    let layouts_title = label("Layouts", MARGIN, 36, title_font);
+    let layout_title = label("Layouts", MARGIN, 36, title_font);
     let layouts_label = label("Drag layouts to set the switching order. Uncheck a layout to skip it:", 68, 20, font);
     let layouts = child(reorder_list::CLASS_NAME, "", 0, 0, CONTENT_X, 92, CONTENT_W, CLIENT_H - 92 - MARGIN, ID_LAYOUTS, font);
 
@@ -251,6 +245,19 @@ unsafe fn create() -> Option<Settings> {
     );
     let correction_record_hint = label(RECORD_HINT, 132, 40, font);
 
+    // Advanced
+    let advanced_title = label("Advanced", MARGIN, 36, title_font);
+    let block_hotkey = child(
+        "BUTTON", "Block hotkeys after they fire",
+        WS_TABSTOP | BS_AUTOCHECKBOX as u32, 0, CONTENT_X, 68, CONTENT_W, 24, ID_BLOCK_HOTKEY, font,
+    );
+    let block_hotkey_hint = label(
+        "Applies to all hotkeys of the app: layout switching, the hotkeys of the layouts \
+         and the last word correction. When on, the key combination is not passed on \
+         to the active application. When off, it is passed on after the action.",
+        96, 60, font,
+    );
+
     // About
     let about_title = label(APP_NAME, MARGIN, 36, title_font);
     let version = label(&format!("Version {}", env!("CARGO_PKG_VERSION")), 56, 20, font);
@@ -268,12 +275,10 @@ unsafe fn create() -> Option<Settings> {
         correction_hotkey,
         secondary: vec![hotkey_hint, block_hotkey_hint, correction_record_hint, version, license],
         pages: [
-            vec![
-                general_title, mode_label, modes[0], modes[1], modes[2],
-                hotkey_label, hotkey, hotkey_clear, hotkey_hint, block_hotkey, block_hotkey_hint,
-            ],
-            vec![layouts_title, layouts_label, layouts],
+            vec![switcher_title, mode_label, modes[0], modes[1], modes[2], hotkey_label, hotkey, hotkey_clear, hotkey_hint],
+            vec![layout_title, layouts_label, layouts],
             vec![correction_title, correction_label, correction_hotkey, correction_clear, correction_hint, correction_record_hint],
+            vec![advanced_title, block_hotkey, block_hotkey_hint],
             vec![about_title, version, description, author, license],
         ],
         config: config::Config::default(),
@@ -308,7 +313,7 @@ fn on_layouts_changed(list: HWND) {
 pub fn hotkey_clash(hotkey: &str, owner: &config::HotkeyOwner) -> Option<String> {
     let user = SETTINGS.with_borrow(|s| s.as_ref()?.config.hotkey_user(hotkey, owner))?;
     let what = match user {
-        config::HotkeyOwner::Main => "the layout switch hotkey on the General page".to_string(),
+        config::HotkeyOwner::Main => "the layout switch hotkey on the Switcher page".to_string(),
         config::HotkeyOwner::Correction => "the last word correction hotkey on the Correction page".to_string(),
         config::HotkeyOwner::Layout(id) => {
             let name = layouts::system().into_iter().find(|l| l.id == id).map_or(id, |l| l.name);

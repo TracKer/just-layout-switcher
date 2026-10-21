@@ -1,6 +1,6 @@
 //! Per-layout options window, opened with the "more" button of a layout row.
-//! It sets the hotkey that switches straight to the layout. Like on the
-//! General page, every change is saved to the config right away.
+//! It sets the hotkey that switches straight to the layout. Like in the
+//! settings window, every change is saved to the config right away.
 
 use crate::{config::HotkeyOwner, hotkey_field, settings, ui};
 use std::cell::RefCell;
