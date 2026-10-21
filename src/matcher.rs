@@ -75,6 +75,11 @@ impl Matcher {
         self.held.retain(|&vk| swallowed.contains(&vk) || is_down(vk));
     }
 
+    /// Raw keys currently held, as the hook saw them.
+    pub fn held(&self) -> &[u32] {
+        &self.held
+    }
+
     pub fn mouse_down(&mut self) {
         self.armed = None;
     }

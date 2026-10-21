@@ -20,6 +20,8 @@ const ID_HOTKEY: i32 = 101;
 const ID_LAYOUTS: i32 = 102;
 const ID_BLOCK_HOTKEY: i32 = 103;
 const ID_HOTKEY_CLEAR: i32 = 104;
+const ID_CORRECTION_HOTKEY: i32 = 105;
+const ID_CORRECTION_CLEAR: i32 = 106;
 /// Radio buttons for the switch modes, in `MODES` order.
 const ID_MODE_FIRST: i32 = 110;
 const ID_MODE_LAST: i32 = ID_MODE_FIRST + MODES.len() as i32 - 1;
@@ -29,6 +31,9 @@ const MODES: [(config::SwitchMode, &str); 3] = [
     (config::SwitchMode::PressCount, "Press once for the first layout, twice for the second, and so on"),
     (config::SwitchMode::PerLayout, "Use only the hotkeys of the layouts (set in the Layouts list)"),
 ];
+
+const RECORD_HINT: &str = "Click the field and press a new key combination. \
+     It is saved as soon as any of the keys is released.";
 
 const CLIENT_W: i32 = 580;
 const CLIENT_H: i32 = 400;
@@ -41,13 +46,15 @@ const CONTENT_W: i32 = CLIENT_W - CONTENT_X - MARGIN;
 pub enum Page {
     General = 0,
     Layouts = 1,
-    About = 2,
+    #[allow(dead_code)] // Opened from the page list only.
+    Correction = 2,
+    About = 3,
 }
 
 /// Static control style; not exposed by the enabled windows-sys features.
 const SS_NOPREFIX: u32 = 0x80;
 
-const PAGE_TITLES: [&str; 3] = ["General", "Layouts", "About"];
+const PAGE_TITLES: [&str; 4] = ["General", "Layouts", "Correction", "About"];
 
 struct Settings {
     hwnd: HWND,
@@ -56,9 +63,10 @@ struct Settings {
     hotkey: HWND,
     block_hotkey: HWND,
     layouts: HWND,
+    correction_hotkey: HWND,
     /// Static controls drawn in gray.
     secondary: Vec<HWND>,
-    pages: [Vec<HWND>; 3],
+    pages: [Vec<HWND>; 4],
     config: config::Config,
 }
 
@@ -94,14 +102,15 @@ pub fn open(page: Page) {
     // Pick up manual edits of the config file.
     let config = config::load();
     switcher::apply(&config);
-    let (hwnd, nav, modes, hotkey, block_hotkey) = SETTINGS.with_borrow_mut(|s| {
+    let (hwnd, nav, modes, hotkey, block_hotkey, correction_hotkey) = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut().unwrap();
         s.config = config.clone();
-        (s.hwnd, s.nav, s.modes, s.hotkey, s.block_hotkey)
+        (s.hwnd, s.nav, s.modes, s.hotkey, s.block_hotkey, s.correction_hotkey)
     });
     show_mode(&modes, hotkey, config.switch_mode);
     ui::set_window_text(hotkey, &config.hotkey);
     ui::set_checked(block_hotkey, config.block_hotkey);
+    ui::set_window_text(correction_hotkey, &config.correction_hotkey);
 
     unsafe {
         SendMessageW(nav, LB_SETCURSEL, page as usize, 0);
@@ -210,11 +219,7 @@ unsafe fn create() -> Option<Settings> {
     let hotkey_clear = child(
         "BUTTON", "Clear", WS_TABSTOP | BS_PUSHBUTTON as u32, 0, CONTENT_X + 268, 204, 80, 30, ID_HOTKEY_CLEAR, font,
     );
-    let hotkey_hint = label(
-        "Click the field and press a new key combination. \
-         It is saved as soon as any of the keys is released.",
-        244, 40, font,
-    );
+    let hotkey_hint = label(RECORD_HINT, 244, 40, font);
     let block_hotkey = child(
         "BUTTON", "Block the hotkey after switching",
         WS_TABSTOP | BS_AUTOCHECKBOX as u32, 0, CONTENT_X, 292, CONTENT_W, 24, ID_BLOCK_HOTKEY, font,
@@ -230,6 +235,22 @@ unsafe fn create() -> Option<Settings> {
     let layouts_label = label("Drag layouts to set the switching order. Uncheck a layout to skip it:", 68, 20, font);
     let layouts = child(reorder_list::CLASS_NAME, "", 0, 0, CONTENT_X, 92, CONTENT_W, CLIENT_H - 92 - MARGIN, ID_LAYOUTS, font);
 
+    // Correction
+    let correction_title = label("Correction", MARGIN, 36, title_font);
+    let correction_label = label("Last word correction hotkey:", 68, 20, font);
+    let correction_hotkey = child(
+        hotkey_field::CLASS_NAME, "", WS_TABSTOP, 0, CONTENT_X, 92, 260, 30, ID_CORRECTION_HOTKEY, font,
+    );
+    let correction_clear = child(
+        "BUTTON", "Clear", WS_TABSTOP | BS_PUSHBUTTON as u32, 0, CONTENT_X + 268, 92, 80, 30, ID_CORRECTION_CLEAR, font,
+    );
+    let correction_hint = label(
+        "Press it right after a word typed in the wrong layout: the word is erased \
+         and typed again in the next layout. Press it again for the layout after that.",
+        180, 60, font,
+    );
+    let correction_record_hint = label(RECORD_HINT, 132, 40, font);
+
     // About
     let about_title = label(APP_NAME, MARGIN, 36, title_font);
     let version = label(&format!("Version {}", env!("CARGO_PKG_VERSION")), 56, 20, font);
@@ -244,13 +265,15 @@ unsafe fn create() -> Option<Settings> {
         hotkey,
         block_hotkey,
         layouts,
-        secondary: vec![hotkey_hint, block_hotkey_hint, version, license],
+        correction_hotkey,
+        secondary: vec![hotkey_hint, block_hotkey_hint, correction_record_hint, version, license],
         pages: [
             vec![
                 general_title, mode_label, modes[0], modes[1], modes[2],
                 hotkey_label, hotkey, hotkey_clear, hotkey_hint, block_hotkey, block_hotkey_hint,
             ],
             vec![layouts_title, layouts_label, layouts],
+            vec![correction_title, correction_label, correction_hotkey, correction_clear, correction_hint, correction_record_hint],
             vec![about_title, version, description, author, license],
         ],
         config: config::Config::default(),
@@ -286,6 +309,7 @@ pub fn hotkey_clash(hotkey: &str, owner: &config::HotkeyOwner) -> Option<String>
     let user = SETTINGS.with_borrow(|s| s.as_ref()?.config.hotkey_user(hotkey, owner))?;
     let what = match user {
         config::HotkeyOwner::Main => "the layout switch hotkey on the General page".to_string(),
+        config::HotkeyOwner::Correction => "the last word correction hotkey on the Correction page".to_string(),
         config::HotkeyOwner::Layout(id) => {
             let name = layouts::system().into_iter().find(|l| l.id == id).map_or(id, |l| l.name);
             format!("the hotkey of the layout \u{201C}{name}\u{201D}")
@@ -350,36 +374,49 @@ fn show_save_error(hwnd: HWND, err: &std::io::Error) {
     unsafe { MessageBoxW(hwnd, message.as_ptr(), caption.as_ptr(), MB_ICONERROR | MB_OK) };
 }
 
-fn on_hotkey_cleared() {
-    if let Some(hotkey) = SETTINGS.with_borrow(|s| s.as_ref().map(|s| s.hotkey)) {
-        ui::set_window_text(hotkey, "");
-        on_hotkey_changed(hotkey);
+/// The config entry of a hotkey set in this window (the common or the
+/// correction hotkey).
+fn hotkey_entry<'a>(config: &'a mut config::Config, owner: &config::HotkeyOwner) -> &'a mut String {
+    match owner {
+        config::HotkeyOwner::Correction => &mut config.correction_hotkey,
+        _ => &mut config.hotkey,
     }
 }
 
-fn on_hotkey_changed(hotkey: HWND) {
-    let text = ui::window_text(hotkey);
-    if let Some(message) = hotkey_clash(&text, &config::HotkeyOwner::Main) {
-        let (hwnd, saved) = SETTINGS.with_borrow(|s| {
-            let s = s.as_ref().unwrap();
-            (s.hwnd, s.config.hotkey.clone())
+fn on_hotkey_cleared(owner: config::HotkeyOwner) {
+    let field = SETTINGS.with_borrow(|s| {
+        let s = s.as_ref()?;
+        Some(if owner == config::HotkeyOwner::Correction { s.correction_hotkey } else { s.hotkey })
+    });
+    if let Some(field) = field {
+        ui::set_window_text(field, "");
+        on_hotkey_changed(field, owner);
+    }
+}
+
+fn on_hotkey_changed(field: HWND, owner: config::HotkeyOwner) {
+    let text = ui::window_text(field);
+    if let Some(message) = hotkey_clash(&text, &owner) {
+        let (hwnd, saved) = SETTINGS.with_borrow_mut(|s| {
+            let s = s.as_mut().unwrap();
+            (s.hwnd, hotkey_entry(&mut s.config, &owner).clone())
         });
-        ui::set_window_text(hotkey, &saved);
+        ui::set_window_text(field, &saved);
         show_hotkey_clash(hwnd, &message);
         return;
     }
     let result = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut()?;
-        let saved = std::mem::replace(&mut s.config.hotkey, text);
+        let saved = std::mem::replace(hotkey_entry(&mut s.config, &owner), text);
         let result = save(&s.config);
         if result.is_err() {
-            s.config.hotkey = saved;
+            *hotkey_entry(&mut s.config, &owner) = saved;
         }
-        Some((s.hwnd, s.config.hotkey.clone(), result))
+        Some((s.hwnd, hotkey_entry(&mut s.config, &owner).clone(), result))
     });
     if let Some((hwnd, saved, Err(err))) = result {
         // Show what is actually in the config.
-        ui::set_window_text(hotkey, &saved);
+        ui::set_window_text(field, &saved);
         show_save_error(hwnd, &err);
     }
 }
@@ -480,8 +517,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         show_page(index as usize);
                     }
                 }
-                (ID_HOTKEY, hotkey_field::HFN_CHANGED) => on_hotkey_changed(lparam as HWND),
-                (ID_HOTKEY_CLEAR, BN_CLICKED) => on_hotkey_cleared(),
+                (ID_HOTKEY, hotkey_field::HFN_CHANGED) => on_hotkey_changed(lparam as HWND, config::HotkeyOwner::Main),
+                (ID_HOTKEY_CLEAR, BN_CLICKED) => on_hotkey_cleared(config::HotkeyOwner::Main),
+                (ID_CORRECTION_HOTKEY, hotkey_field::HFN_CHANGED) => {
+                    on_hotkey_changed(lparam as HWND, config::HotkeyOwner::Correction)
+                }
+                (ID_CORRECTION_CLEAR, BN_CLICKED) => on_hotkey_cleared(config::HotkeyOwner::Correction),
                 (ID_MODE_FIRST..=ID_MODE_LAST, BN_CLICKED) => on_mode_changed((id - ID_MODE_FIRST) as usize),
                 (ID_BLOCK_HOTKEY, BN_CLICKED) => on_block_hotkey_changed(lparam as HWND),
                 (ID_LAYOUTS, reorder_list::RLN_CHANGED) => on_layouts_changed(lparam as HWND),

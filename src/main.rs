@@ -11,6 +11,7 @@ mod reorder_list;
 mod settings;
 mod switcher;
 mod ui;
+mod word;
 
 use settings::Page;
 use std::ptr::null_mut;

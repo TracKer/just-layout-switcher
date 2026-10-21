@@ -11,8 +11,13 @@
 //! or the one whose own hotkey was pressed. It is requested from the focused
 //! window with `WM_INPUTLANGCHANGEREQUEST`, the same way the system hotkey
 //! does it.
+//!
+//! The correction hotkey fixes a word typed in the wrong layout: the hook
+//! remembers the keys of the last word, and on the hotkey they are erased
+//! with Backspace and pressed again once the window has switched to the next
+//! layout.
 
-use crate::{config, hotkey_field, keys, layouts, matcher::Matcher, ui};
+use crate::{config, hotkey_field, keys, layouts, matcher::Matcher, ui, word};
 use std::cell::RefCell;
 use std::ptr::null_mut;
 use windows_sys::Win32::{
@@ -35,6 +40,14 @@ const INJECTED_MARK: usize = 0x4A4C_5300;
 /// An unassigned virtual key, used to break up modifier taps.
 const VK_MASK: u16 = 0xE8;
 
+const TIMER_CORRECTION: usize = 1;
+/// How often to check whether the window has switched the layout before
+/// the corrected word is typed.
+const CORRECTION_POLL_MS: u32 = 10;
+/// Type the word anyway if the window doesn't report the new layout by then
+/// (consoles, for one, may never do).
+const CORRECTION_WAIT_MS: u32 = 300;
+
 /// How long a requested layout is assumed to be the current one while the
 /// target window hasn't processed the request yet.
 const PENDING_MS: u32 = 500;
@@ -50,6 +63,17 @@ enum Action {
     PressCount,
     /// This very layout (HKL).
     Layout(u32),
+    /// Retype the last word in the next enabled layout.
+    Correction,
+}
+
+/// A word waiting for its window to switch the layout.
+struct Correction {
+    /// GUI thread of the window.
+    thread: u32,
+    hkl: u32,
+    keys: Vec<word::Key>,
+    started: u32,
 }
 
 struct Switcher {
@@ -64,6 +88,9 @@ struct Switcher {
     pending: Option<(u32, u32, u32)>,
     /// Press-count mode: index of the last pressed layout and when.
     series: Option<(usize, u32)>,
+    /// The keys of the word being typed.
+    word: word::Word,
+    correction: Option<Correction>,
 }
 
 thread_local! {
@@ -76,6 +103,8 @@ thread_local! {
         config: config::Config::default(),
         pending: None,
         series: None,
+        word: word::Word::default(),
+        correction: None,
     });
 }
 
@@ -115,13 +144,15 @@ pub fn apply(config: &config::Config) {
         s.actions = actions;
         s.series = None;
         s.matcher.set(hotkeys, config.block_hotkey);
-        s.matcher.fires_on_release()
+        // Clicks also move the caret away from the remembered word.
+        s.matcher.fires_on_release() || s.actions.iter().any(|a| matches!(a, Action::Correction))
     });
     set_mouse_hook(need_mouse);
 }
 
 /// The tracked hotkeys and what each one does: the common hotkey as the mode
-/// says, plus the layouts' own hotkeys in every mode.
+/// says, plus the correction hotkey and the layouts' own hotkeys in every
+/// mode.
 fn hotkeys(config: &config::Config) -> (Vec<Vec<u32>>, Vec<Action>) {
     let main = match config.switch_mode {
         config::SwitchMode::Cycle => Some(Action::Cycle),
@@ -136,7 +167,8 @@ fn hotkeys(config: &config::Config) -> (Vec<Vec<u32>>, Vec<Action>) {
         let hkl = u32::from_str_radix(&l.id, 16).ok()?;
         Some((keys::parse(&l.hotkey)?, Action::Layout(hkl)))
     });
-    main.into_iter().chain(own).unzip()
+    let correction = keys::parse(&config.correction_hotkey).map(|keys| (keys, Action::Correction));
+    main.into_iter().chain(correction).chain(own).unzip()
 }
 
 pub fn stop() {
@@ -197,6 +229,18 @@ fn handle_key(kb: &KBDLLHOOKSTRUCT) -> bool {
             s.matcher.forget_released(|vk| unsafe { GetAsyncKeyState(vk as i32) } < 0);
             s.matcher.key_down(kb.vkCode)
         };
+        if !up && outcome.fire.is_none() && !outcome.swallow {
+            let held = |vk| s.matcher.held().iter().any(|&k| keys::normalize(k) == vk);
+            let shortcut = held(VK_CONTROL as u32) || held(keys::VK_ALT) || held(keys::VK_WIN);
+            let key = word::Key {
+                vk: kb.vkCode,
+                scan: kb.scanCode,
+                extended: kb.flags & LLKHF_EXTENDED != 0,
+                shift: held(VK_SHIFT as u32),
+            };
+            let window = unsafe { GetForegroundWindow() } as isize;
+            s.word.key_down(key, window, shortcut);
+        }
         Some((s.window, outcome))
     }) else {
         return false;
@@ -221,51 +265,78 @@ fn handle_key(kb: &KBDLLHOOKSTRUCT) -> bool {
 }
 
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let message = wparam as u32;
     if code == HC_ACTION as i32
         && matches!(
-            wparam as u32,
+            message,
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN | WM_MOUSEWHEEL | WM_MOUSEHWHEEL
         )
     {
         let _ = SWITCHER.try_with(|s| {
             if let Ok(mut s) = s.try_borrow_mut() {
                 s.matcher.mouse_down();
+                // Scrolling leaves the caret where it was.
+                if !matches!(message, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) {
+                    s.word.clear();
+                }
             }
         });
     }
     CallNextHookEx(null_mut(), code, wparam, lparam)
 }
 
-/// Sends the mask key down and up, then the key-up we swallowed, if any.
-unsafe fn send_mask(replay_vk: u16, replay_scan: u32) {
-    let key = |vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS| INPUT {
+fn key_input(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+    INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT { wVk: vk, wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: INJECTED_MARK },
         },
-    };
-    let mut inputs = vec![key(VK_MASK, 0, 0), key(VK_MASK, 0, KEYEVENTF_KEYUP)];
+    }
+}
+
+/// Sends the mask key down and up, then the key-up we swallowed, if any.
+unsafe fn send_mask(replay_vk: u16, replay_scan: u32) {
+    let mut inputs = vec![key_input(VK_MASK, 0, 0), key_input(VK_MASK, 0, KEYEVENTF_KEYUP)];
     if replay_vk != 0 {
         let extended = if replay_scan & (1 << 16) != 0 { KEYEVENTF_EXTENDEDKEY } else { 0 };
-        inputs.push(key(replay_vk, replay_scan as u16, KEYEVENTF_KEYUP | extended));
+        inputs.push(key_input(replay_vk, replay_scan as u16, KEYEVENTF_KEYUP | extended));
     }
     SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
 }
 
-/// Switches the foreground application to the layout picked by the action
-/// of the hotkey with this index.
-unsafe fn switch_layout(index: usize, continues: bool) {
+impl Switcher {
+    /// The layout of the window's GUI thread. Quick repeated presses may come
+    /// before the window has processed the previous request; go on from what
+    /// was requested then.
+    fn current_layout(&self, thread: u32, now: u32) -> u32 {
+        let actual = unsafe { GetKeyboardLayout(thread) } as usize as u32;
+        match self.pending {
+            Some((t, hkl, tick)) if t == thread && hkl != actual && now.wrapping_sub(tick) < PENDING_MS => hkl,
+            _ => actual,
+        }
+    }
+}
+
+/// Does what the hotkey with this index is for.
+unsafe fn on_hotkey(index: usize, continues: bool) {
+    // The config may have changed since the hotkey fired.
+    match SWITCHER.with_borrow(|s| s.actions.get(index).copied()) {
+        Some(Action::Correction) => start_correction(),
+        Some(action) => switch_layout(action, continues),
+        None => {}
+    }
+}
+
+/// Switches the foreground application to the layout picked by `action`.
+unsafe fn switch_layout(action: Action, continues: bool) {
     let foreground = GetForegroundWindow();
     if foreground.is_null() {
         return;
     }
     let thread = GetWindowThreadProcessId(foreground, null_mut());
-    let actual = GetKeyboardLayout(thread) as usize as u32;
     let now = GetTickCount();
 
     let next = SWITCHER.with_borrow_mut(|s| {
-        // The config may have changed since the hotkey fired.
-        let action = *s.actions.get(index)?;
         let list = layouts::switch_order(&s.config.layouts);
         match action {
             Action::Layout(hkl) => list.iter().any(|&(l, _)| l == hkl).then_some(hkl),
@@ -277,20 +348,17 @@ unsafe fn switch_layout(index: usize, continues: bool) {
                 s.series = Some((index, now));
                 layouts::nth_enabled(&list, index)
             }
-            Action::Cycle => {
-                // Quick repeated presses may come before the window has
-                // processed the previous request; go on from what was
-                // requested then.
-                let current = match s.pending {
-                    Some((t, hkl, tick)) if t == thread && hkl != actual && now.wrapping_sub(tick) < PENDING_MS => hkl,
-                    _ => actual,
-                };
-                layouts::next_enabled(&list, current)
-            }
+            Action::Cycle => layouts::next_enabled(&list, s.current_layout(thread, now)),
+            Action::Correction => None,
         }
     });
-    let Some(next) = next else { return };
+    if let Some(next) = next {
+        request_layout(foreground, thread, next, now);
+    }
+}
 
+/// Asks the window to switch to the layout `hkl`.
+unsafe fn request_layout(foreground: HWND, thread: u32, hkl: u32, now: u32) {
     // The focused control's window gets the request, like with the system
     // hotkey; fall back to the active and the foreground window.
     let mut info: GUITHREADINFO = std::mem::zeroed();
@@ -301,14 +369,114 @@ unsafe fn switch_layout(index: usize, continues: bool) {
         foreground
     };
     // HKL handles are sign-extended 32-bit values.
-    PostMessageW(target, WM_INPUTLANGCHANGEREQUEST, 0, next as i32 as LPARAM);
-    SWITCHER.with_borrow_mut(|s| s.pending = Some((thread, next, now)));
+    PostMessageW(target, WM_INPUTLANGCHANGEREQUEST, 0, hkl as i32 as LPARAM);
+    SWITCHER.with_borrow_mut(|s| s.pending = Some((thread, hkl, now)));
+}
+
+/// Switches the foreground window to the next enabled layout and, once it
+/// has switched, types the last word again.
+unsafe fn start_correction() {
+    let foreground = GetForegroundWindow();
+    if foreground.is_null() {
+        return;
+    }
+    let thread = GetWindowThreadProcessId(foreground, null_mut());
+    let now = GetTickCount();
+    let started = SWITCHER.with_borrow_mut(|s| {
+        if s.correction.is_some() {
+            return None;
+        }
+        let keys = s.word.keys(foreground as isize)?.to_vec();
+        let list = layouts::switch_order(&s.config.layouts);
+        let hkl = layouts::next_enabled(&list, s.current_layout(thread, now))?;
+        s.correction = Some(Correction { thread, hkl, keys, started: now });
+        Some((s.window, hkl))
+    });
+    let Some((window, hkl)) = started else { return };
+    request_layout(foreground, thread, hkl, now);
+    SetTimer(window, TIMER_CORRECTION, CORRECTION_POLL_MS, None);
+}
+
+/// Types the waiting word once its window has switched the layout or the
+/// wait is over.
+unsafe fn on_correction_timer(window: HWND) {
+    let now = GetTickCount();
+    let ready = SWITCHER.with_borrow_mut(|s| {
+        let Some(c) = &s.correction else { return Some(None) };
+        let switched = GetKeyboardLayout(c.thread) as usize as u32 == c.hkl;
+        (switched || now.wrapping_sub(c.started) >= CORRECTION_WAIT_MS).then(|| s.correction.take())
+    });
+    // Still waiting.
+    let Some(correction) = ready else { return };
+    KillTimer(window, TIMER_CORRECTION);
+    let Some(correction) = correction else { return };
+    let held = SWITCHER.with_borrow(|s| s.matcher.held().to_vec());
+    retype(&correction.keys, correction.hkl, &held);
+}
+
+/// Erases as many characters as there are keys and presses the keys again
+/// in the layout `hkl`. Modifiers the user holds are released for that time,
+/// or the keys would come as shortcuts (Ctrl+Backspace erases a word).
+unsafe fn retype(keys: &[word::Key], hkl: u32, held: &[u32]) {
+    let modifiers: Vec<u16> =
+        held.iter().filter(|&&vk| keys::is_modifier(keys::normalize(vk))).map(|&vk| vk as u16).collect();
+    let modifier_flags = |vk: u16| match vk {
+        VK_RCONTROL | VK_RMENU | VK_LWIN | VK_RWIN => KEYEVENTF_EXTENDEDKEY,
+        _ => 0,
+    };
+    // Releasing (and later pressing) Alt or Win alone opens a menu.
+    let mask = modifiers.iter().any(|&vk| matches!(keys::normalize(vk as u32), keys::VK_ALT | keys::VK_WIN));
+
+    let mut inputs = Vec::new();
+    if mask {
+        inputs.extend([key_input(VK_MASK, 0, 0), key_input(VK_MASK, 0, KEYEVENTF_KEYUP)]);
+    }
+    for &vk in &modifiers {
+        inputs.push(key_input(vk, 0, KEYEVENTF_KEYUP | modifier_flags(vk)));
+    }
+    let back_scan = MapVirtualKeyW(VK_BACK as u32, MAPVK_VK_TO_VSC) as u16;
+    for _ in keys {
+        inputs.extend([key_input(VK_BACK, back_scan, 0), key_input(VK_BACK, back_scan, KEYEVENTF_KEYUP)]);
+    }
+    let shift_scan = MapVirtualKeyW(VK_LSHIFT as u32, MAPVK_VK_TO_VSC) as u16;
+    for key in keys {
+        // The same physical key; its virtual key depends on the layout,
+        // except for the keypad and the extended keys.
+        let vk = if key.extended || (0x60..=0x6F).contains(&key.vk) {
+            key.vk
+        } else {
+            match MapVirtualKeyExW(key.scan, MAPVK_VSC_TO_VK_EX, hkl as i32 as isize as HKL) {
+                0 => key.vk,
+                vk => vk,
+            }
+        } as u16;
+        let flags = if key.extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
+        if key.shift {
+            inputs.push(key_input(VK_LSHIFT, shift_scan, 0));
+        }
+        let scan = key.scan as u16;
+        inputs.extend([key_input(vk, scan, flags), key_input(vk, scan, flags | KEYEVENTF_KEYUP)]);
+        if key.shift {
+            inputs.push(key_input(VK_LSHIFT, shift_scan, KEYEVENTF_KEYUP));
+        }
+    }
+    for &vk in &modifiers {
+        inputs.push(key_input(vk, 0, modifier_flags(vk)));
+    }
+    if mask {
+        inputs.extend([key_input(VK_MASK, 0, 0), key_input(VK_MASK, 0, KEYEVENTF_KEYUP)]);
+    }
+    SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_SWITCH => {
-            switch_layout(lparam as usize, wparam != 0);
+            on_hotkey(lparam as usize, wparam != 0);
+            0
+        }
+        WM_TIMER if wparam == TIMER_CORRECTION => {
+            on_correction_timer(hwnd);
             0
         }
         WM_MASK => {

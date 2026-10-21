@@ -12,6 +12,8 @@ pub struct Config {
     /// Swallow the hotkey after switching instead of passing it on to the
     /// focused application and other hooks.
     pub block_hotkey: bool,
+    /// Retypes the last word in the next layout; empty if none.
+    pub correction_hotkey: String,
     /// User-defined switching order; empty means the system order.
     pub layouts: Vec<LayoutOrder>,
 }
@@ -71,6 +73,8 @@ pub enum HotkeyOwner {
     Main,
     /// The hotkey of the layout with this id.
     Layout(String),
+    /// The last word correction hotkey on the Correction page.
+    Correction,
 }
 
 impl Config {
@@ -83,6 +87,9 @@ impl Config {
         let same = |text: &str| crate::keys::parse(text).as_ref() == Some(&keys);
         if *owner != HotkeyOwner::Main && same(&self.hotkey) {
             return Some(HotkeyOwner::Main);
+        }
+        if *owner != HotkeyOwner::Correction && same(&self.correction_hotkey) {
+            return Some(HotkeyOwner::Correction);
         }
         self.layouts
             .iter()
@@ -97,6 +104,7 @@ impl Default for Config {
             switch_mode: SwitchMode::Cycle,
             hotkey: "Alt + Shift".to_string(),
             block_hotkey: true,
+            correction_hotkey: String::new(),
             layouts: Vec::new(),
         }
     }
@@ -135,7 +143,11 @@ mod tests {
     use super::*;
 
     fn config() -> Config {
-        let mut config = Config { hotkey: "Alt + Shift".to_string(), ..Config::default() };
+        let mut config = Config {
+            hotkey: "Alt + Shift".to_string(),
+            correction_hotkey: "Pause".to_string(),
+            ..Config::default()
+        };
         let mut en = LayoutOrder::new("EN".to_string(), 1, true);
         en.hotkey = "Ctrl + 1".to_string();
         let mut ru = LayoutOrder::new("RU".to_string(), 2, true);
@@ -154,6 +166,8 @@ mod tests {
         // A turned off hotkey still counts.
         assert_eq!(config.hotkey_user("Ctrl + 2", &de), Some(HotkeyOwner::Layout("RU".to_string())));
         assert_eq!(config.hotkey_user("Ctrl + 3", &de), None);
+        assert_eq!(config.hotkey_user("Pause", &HotkeyOwner::Main), Some(HotkeyOwner::Correction));
+        assert_eq!(config.hotkey_user("Alt + Shift", &HotkeyOwner::Correction), Some(HotkeyOwner::Main));
     }
 
     #[test]
@@ -169,6 +183,7 @@ mod tests {
         let config = config();
         assert_eq!(config.hotkey_user("Alt + Shift", &HotkeyOwner::Main), None);
         assert_eq!(config.hotkey_user("Ctrl + 1", &HotkeyOwner::Layout("EN".to_string())), None);
+        assert_eq!(config.hotkey_user("Pause", &HotkeyOwner::Correction), None);
     }
 
     #[test]
