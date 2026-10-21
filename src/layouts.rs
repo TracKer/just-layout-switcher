@@ -15,6 +15,7 @@ pub struct Layout {
     /// HKL as 8 hex digits; stored in the config.
     pub id: String,
     pub name: String,
+    pub enabled: bool,
 }
 
 /// Layouts the user can switch between, in the system order.
@@ -30,21 +31,22 @@ pub fn system() -> Vec<Layout> {
                 Layout {
                     id: format!("{hkl:08X}"),
                     name: display_name(hkl),
+                    enabled: true,
                 }
             })
             .collect()
     }
 }
 
-/// Sorts layouts by the configured order. Layouts missing from the config
-/// keep their system order and go after the configured ones.
+/// Sorts layouts by the configured order and applies their enabled state.
+/// Layouts missing from the config are enabled, keep their system order and
+/// go after the configured ones.
 pub fn apply_order(mut layouts: Vec<Layout>, order: &[LayoutOrder]) -> Vec<Layout> {
-    layouts.sort_by_key(|layout| {
-        order
-            .iter()
-            .find(|o| o.id == layout.id)
-            .map_or(u32::MAX, |o| o.order)
-    });
+    let configured = |layout: &Layout| order.iter().find(|o| o.id == layout.id);
+    for layout in &mut layouts {
+        layout.enabled = configured(layout).is_none_or(|o| o.enabled);
+    }
+    layouts.sort_by_key(|layout| configured(layout).map_or(u32::MAX, |o| o.order));
     layouts
 }
 
@@ -154,11 +156,11 @@ mod tests {
     use super::*;
 
     fn layout(id: &str) -> Layout {
-        Layout { id: id.to_string(), name: String::new() }
+        Layout { id: id.to_string(), name: String::new(), enabled: true }
     }
 
     fn order(id: &str, order: u32) -> LayoutOrder {
-        LayoutOrder { id: id.to_string(), order }
+        LayoutOrder { id: id.to_string(), order, enabled: true }
     }
 
     fn ids(layouts: &[Layout]) -> Vec<&str> {
@@ -178,5 +180,22 @@ mod tests {
             &[order("C", 1), order("A", 2), order("GONE", 3)],
         );
         assert_eq!(ids(&sorted), ["C", "A", "B", "D"]);
+    }
+
+    #[test]
+    fn enabled_state_comes_from_config_and_new_layouts_are_enabled() {
+        let sorted = apply_order(
+            vec![layout("A"), layout("B")],
+            &[LayoutOrder { enabled: false, ..order("A", 1) }],
+        );
+        let enabled: Vec<_> = sorted.iter().map(|l| (l.id.as_str(), l.enabled)).collect();
+        assert_eq!(enabled, [("A", false), ("B", true)]);
+    }
+
+    #[test]
+    fn missing_enabled_field_means_enabled() {
+        let config: crate::config::Config =
+            serde_yaml::from_str("layouts:\n- id: '04090409'\n  order: 1\n").unwrap();
+        assert!(config.layouts[0].enabled);
     }
 }

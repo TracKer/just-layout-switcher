@@ -7,6 +7,41 @@ use windows_sys::Win32::{
 
 static DPI: AtomicU32 = AtomicU32::new(96);
 
+/// Makes standard controls (buttons etc.) use the modern visual style.
+///
+/// The exe has no manifest, so this activates the Common Controls v6
+/// manifest that ships inside shell32.dll (resource 124) for this thread.
+/// Must be called before any window is created.
+pub fn enable_visual_styles() {
+    use windows_sys::Win32::System::{
+        ApplicationInstallationAndServicing::{ActivateActCtx, CreateActCtxW, ACTCTXW},
+        SystemInformation::GetSystemDirectoryW,
+    };
+    const ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID: u32 = 0x4;
+    const ACTCTX_FLAG_RESOURCE_NAME_VALID: u32 = 0x8;
+
+    unsafe {
+        let mut dir = [0u16; 260];
+        if GetSystemDirectoryW(dir.as_mut_ptr(), dir.len() as u32) == 0 {
+            return;
+        }
+        let source = wide("shell32.dll");
+        let ctx = ACTCTXW {
+            cbSize: std::mem::size_of::<ACTCTXW>() as u32,
+            dwFlags: ACTCTX_FLAG_RESOURCE_NAME_VALID | ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID,
+            lpSource: source.as_ptr(),
+            lpAssemblyDirectory: dir.as_ptr(),
+            lpResourceName: 124 as _,
+            ..std::mem::zeroed()
+        };
+        let handle = CreateActCtxW(&ctx);
+        if handle != INVALID_HANDLE_VALUE {
+            let mut cookie = 0;
+            ActivateActCtx(handle, &mut cookie);
+        }
+    }
+}
+
 pub fn init_dpi() {
     DPI.store(unsafe { GetDpiForSystem() }, Ordering::Relaxed);
 }

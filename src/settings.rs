@@ -1,6 +1,6 @@
 //! The settings window: a page list on the left, the selected page on the right.
 
-use crate::{config, hotkey_field, icon, layouts, reorder_list, ui};
+use crate::{config, hotkey_field, icon, layout_dialog, layouts, reorder_list, ui};
 use std::cell::RefCell;
 use std::ptr::null_mut;
 use windows_sys::Win32::{
@@ -128,7 +128,7 @@ fn refresh_layouts() {
     };
     let items = layouts::apply_order(layouts::system(), &order)
         .into_iter()
-        .map(|l| reorder_list::Item { id: l.id, text: l.name })
+        .map(|l| reorder_list::Item { id: l.id, text: l.name, enabled: l.enabled })
         .collect();
     reorder_list::set_items(list, items);
 }
@@ -189,7 +189,7 @@ unsafe fn create() -> Option<Settings> {
 
     // Layouts
     let layouts_title = label("Layouts", MARGIN, 36, title_font);
-    let layouts_label = label("Drag layouts to set the switching order:", 68, 20, font);
+    let layouts_label = label("Drag layouts to set the switching order. Uncheck a layout to skip it:", 68, 20, font);
     let layouts = child(reorder_list::CLASS_NAME, "", 0, 0, CONTENT_X, 92, CONTENT_W, 252, ID_LAYOUTS, font);
 
     // About
@@ -214,11 +214,11 @@ unsafe fn create() -> Option<Settings> {
     })
 }
 
-fn on_layouts_reordered(list: HWND) {
-    let order = reorder_list::ids(list)
+fn on_layouts_changed(list: HWND) {
+    let order = reorder_list::entries(list)
         .into_iter()
         .zip(1..)
-        .map(|(id, order)| config::LayoutOrder { id, order })
+        .map(|((id, enabled), order)| config::LayoutOrder { id, order, enabled })
         .collect();
     let result = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut()?;
@@ -306,7 +306,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     }
                 }
                 (ID_HOTKEY, hotkey_field::HFN_CHANGED) => on_hotkey_changed(lparam as HWND),
-                (ID_LAYOUTS, reorder_list::RLN_CHANGED) => on_layouts_reordered(lparam as HWND),
+                (ID_LAYOUTS, reorder_list::RLN_CHANGED) => on_layouts_changed(lparam as HWND),
+                (ID_LAYOUTS, reorder_list::RLN_MORE) => {
+                    if let Some((_, name)) = reorder_list::active_item(lparam as HWND) {
+                        layout_dialog::open(hwnd, &name);
+                    }
+                }
                 _ => {}
             }
             0

@@ -4,6 +4,7 @@ mod config;
 mod hotkey_field;
 mod icon;
 mod keys;
+mod layout_dialog;
 mod layouts;
 mod reorder_list;
 mod settings;
@@ -42,7 +43,9 @@ fn main() {
         ui::init_dpi();
         config::load(); // creates the default config file if missing
 
+        ui::enable_visual_styles();
         hotkey_field::register();
+        layout_dialog::register();
         reorder_list::register();
         settings::register();
         let Some(tray) = create_tray_window() else { return };
@@ -50,6 +53,9 @@ fn main() {
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            if layout_dialog::is_dialog_message(&msg) {
+                continue;
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

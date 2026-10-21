@@ -18,6 +18,13 @@ pub struct LayoutOrder {
     pub id: String,
     /// Position in the list, starting from 1 at the top.
     pub order: u32,
+    /// Disabled layouts keep their position but are skipped when switching.
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+}
+
+fn enabled_by_default() -> bool {
+    true
 }
 
 impl Default for Config {
