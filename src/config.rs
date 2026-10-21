@@ -6,6 +6,7 @@ const FILE_NAME: &str = "config.yaml";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub switch_mode: SwitchMode,
     /// Human-readable key combination, e.g. "Ctrl + Shift".
     pub hotkey: String,
     /// Swallow the hotkey after switching instead of passing it on to the
@@ -13,6 +14,23 @@ pub struct Config {
     pub block_hotkey: bool,
     /// User-defined switching order; empty means the system order.
     pub layouts: Vec<LayoutOrder>,
+}
+
+/// How the hotkey picks the layout to switch to. Disabled layouts are
+/// skipped in every mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchMode {
+    /// Each press switches to the next layout, wrapping from the last to the first.
+    #[default]
+    Cycle,
+    /// N presses in a row switch to the N-th enabled layout.
+    /// TODO: not implemented yet.
+    PressCount,
+    /// Every layout has its own hotkey, set in its options dialog ("..." in
+    /// the Layouts list); the common hotkey is unused.
+    /// TODO: not implemented yet.
+    PerLayout,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,6 +51,7 @@ fn enabled_by_default() -> bool {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            switch_mode: SwitchMode::Cycle,
             hotkey: "Alt + Shift".to_string(),
             block_hotkey: true,
             layouts: Vec::new(),

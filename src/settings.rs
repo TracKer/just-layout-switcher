@@ -8,7 +8,7 @@ use windows_sys::Win32::{
     Graphics::Gdi::*,
     System::LibraryLoader::GetModuleHandleW,
     UI::Controls::*,
-    UI::Input::KeyboardAndMouse::SetFocus,
+    UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus},
     UI::WindowsAndMessaging::*,
 };
 
@@ -19,9 +19,18 @@ const ID_NAV: i32 = 100;
 const ID_HOTKEY: i32 = 101;
 const ID_LAYOUTS: i32 = 102;
 const ID_BLOCK_HOTKEY: i32 = 103;
+/// Radio buttons for the switch modes, in `MODES` order.
+const ID_MODE_FIRST: i32 = 110;
+const ID_MODE_LAST: i32 = ID_MODE_FIRST + MODES.len() as i32 - 1;
+
+const MODES: [(config::SwitchMode, &str); 3] = [
+    (config::SwitchMode::Cycle, "Switch to the next layout on each press"),
+    (config::SwitchMode::PressCount, "Press once for the first layout, twice for the second, and so on"),
+    (config::SwitchMode::PerLayout, "Use a separate hotkey for each layout (set in the Layouts list)"),
+];
 
 const CLIENT_W: i32 = 580;
-const CLIENT_H: i32 = 360;
+const CLIENT_H: i32 = 400;
 const NAV_W: i32 = 160;
 const MARGIN: i32 = 16;
 const CONTENT_X: i32 = MARGIN + NAV_W + 24;
@@ -42,6 +51,7 @@ const PAGE_TITLES: [&str; 3] = ["General", "Layouts", "About"];
 struct Settings {
     hwnd: HWND,
     nav: HWND,
+    modes: [HWND; 3],
     hotkey: HWND,
     block_hotkey: HWND,
     layouts: HWND,
@@ -82,11 +92,12 @@ pub fn open(page: Page) {
 
     // Pick up manual edits of the config file.
     let config = config::load();
-    let (hwnd, nav, hotkey, block_hotkey) = SETTINGS.with_borrow_mut(|s| {
+    let (hwnd, nav, modes, hotkey, block_hotkey) = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut().unwrap();
         s.config = config.clone();
-        (s.hwnd, s.nav, s.hotkey, s.block_hotkey)
+        (s.hwnd, s.nav, s.modes, s.hotkey, s.block_hotkey)
     });
+    show_mode(&modes, hotkey, config.switch_mode);
     ui::set_window_text(hotkey, &config.hotkey);
     ui::set_checked(block_hotkey, config.block_hotkey);
 
@@ -182,27 +193,37 @@ unsafe fn create() -> Option<Settings> {
 
     // General
     let general_title = label("General", MARGIN, 36, title_font);
-    let hotkey_label = label("Layout switch hotkey:", 68, 20, font);
-    let hotkey = child(hotkey_field::CLASS_NAME, "", WS_TABSTOP, 0, CONTENT_X, 92, 260, 30, ID_HOTKEY, font);
+    let mode_label = label("Switching mode:", 68, 20, font);
+    let modes: [HWND; 3] = std::array::from_fn(|i| {
+        // The group starts at the first button: Tab lands on the checked one,
+        // the arrow keys move between them.
+        let style = if i == 0 { WS_TABSTOP | WS_GROUP } else { 0 };
+        let y = 92 + 26 * i as i32;
+        child("BUTTON", MODES[i].1, style | BS_AUTORADIOBUTTON as u32, 0, CONTENT_X, y, CONTENT_W, 24, ID_MODE_FIRST + i as i32, font)
+    });
+    let hotkey_label = label("Layout switch hotkey:", 180, 20, font);
+    let hotkey = child(
+        hotkey_field::CLASS_NAME, "", WS_TABSTOP | WS_GROUP, 0, CONTENT_X, 204, 260, 30, ID_HOTKEY, font,
+    );
     let hotkey_hint = label(
         "Click the field and press a new key combination. \
          It is saved as soon as any of the keys is released.",
-        132, 40, font,
+        244, 40, font,
     );
     let block_hotkey = child(
         "BUTTON", "Block the hotkey after switching",
-        WS_TABSTOP | BS_AUTOCHECKBOX as u32, 0, CONTENT_X, 184, CONTENT_W, 24, ID_BLOCK_HOTKEY, font,
+        WS_TABSTOP | BS_AUTOCHECKBOX as u32, 0, CONTENT_X, 292, CONTENT_W, 24, ID_BLOCK_HOTKEY, font,
     );
     let block_hotkey_hint = label(
         "When on, the key combination is not passed on to the active application. \
          When off, it is passed on after switching.",
-        212, 40, font,
+        320, 40, font,
     );
 
     // Layouts
     let layouts_title = label("Layouts", MARGIN, 36, title_font);
     let layouts_label = label("Drag layouts to set the switching order. Uncheck a layout to skip it:", 68, 20, font);
-    let layouts = child(reorder_list::CLASS_NAME, "", 0, 0, CONTENT_X, 92, CONTENT_W, 252, ID_LAYOUTS, font);
+    let layouts = child(reorder_list::CLASS_NAME, "", 0, 0, CONTENT_X, 92, CONTENT_W, CLIENT_H - 92 - MARGIN, ID_LAYOUTS, font);
 
     // About
     let about_title = label(APP_NAME, MARGIN, 36, title_font);
@@ -214,12 +235,16 @@ unsafe fn create() -> Option<Settings> {
     Some(Settings {
         hwnd,
         nav,
+        modes,
         hotkey,
         block_hotkey,
         layouts,
         secondary: vec![hotkey_hint, block_hotkey_hint, version, license],
         pages: [
-            vec![general_title, hotkey_label, hotkey, hotkey_hint, block_hotkey, block_hotkey_hint],
+            vec![
+                general_title, mode_label, modes[0], modes[1], modes[2],
+                hotkey_label, hotkey, hotkey_hint, block_hotkey, block_hotkey_hint,
+            ],
             vec![layouts_title, layouts_label, layouts],
             vec![about_title, version, description, author, license],
         ],
@@ -263,6 +288,34 @@ fn on_hotkey_changed(hotkey: HWND) {
     if let Some((hwnd, saved, Err(err))) = result {
         // Show what is actually in the config.
         ui::set_window_text(hotkey, &saved);
+        show_save_error(hwnd, &err);
+    }
+}
+
+/// Checks the radio button of `mode`. The common hotkey is unused when
+/// every layout has its own, so its field is disabled then.
+fn show_mode(modes: &[HWND; 3], hotkey: HWND, mode: config::SwitchMode) {
+    for (&radio, (m, _)) in modes.iter().zip(MODES) {
+        ui::set_checked(radio, m == mode);
+    }
+    unsafe { EnableWindow(hotkey, (mode != config::SwitchMode::PerLayout) as BOOL) };
+}
+
+fn on_mode_changed(index: usize) {
+    let mode = MODES[index].0;
+    let result = SETTINGS.with_borrow_mut(|s| {
+        let s = s.as_mut()?;
+        let saved = std::mem::replace(&mut s.config.switch_mode, mode);
+        let result = config::save(&s.config);
+        if result.is_err() {
+            s.config.switch_mode = saved;
+        }
+        Some((s.hwnd, s.modes, s.hotkey, s.config.switch_mode, result))
+    });
+    let Some((hwnd, modes, hotkey, mode, result)) = result else { return };
+    // Show what is actually in the config.
+    show_mode(&modes, hotkey, mode);
+    if let Err(err) = result {
         show_save_error(hwnd, &err);
     }
 }
@@ -336,6 +389,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     }
                 }
                 (ID_HOTKEY, hotkey_field::HFN_CHANGED) => on_hotkey_changed(lparam as HWND),
+                (ID_MODE_FIRST..=ID_MODE_LAST, BN_CLICKED) => on_mode_changed((id - ID_MODE_FIRST) as usize),
                 (ID_BLOCK_HOTKEY, BN_CLICKED) => on_block_hotkey_changed(lparam as HWND),
                 (ID_LAYOUTS, reorder_list::RLN_CHANGED) => on_layouts_changed(lparam as HWND),
                 (ID_LAYOUTS, reorder_list::RLN_MORE) => {

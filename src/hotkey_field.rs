@@ -14,7 +14,7 @@ use windows_sys::Win32::{
     Foundation::*,
     Graphics::Gdi::*,
     System::LibraryLoader::GetModuleHandleW,
-    UI::Input::KeyboardAndMouse::{GetAsyncKeyState, SetFocus},
+    UI::Input::KeyboardAndMouse::{GetAsyncKeyState, IsWindowEnabled, SetFocus},
     UI::WindowsAndMessaging::*,
 };
 
@@ -201,6 +201,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             cancel_recording(hwnd);
             0
         }
+        WM_ENABLE => {
+            // A disabled field gets no input; repaint it grayed out.
+            cancel_recording(hwnd);
+            InvalidateRect(hwnd, std::ptr::null(), 1);
+            0
+        }
         WM_REC_COMMIT => {
             let text = REC.with_borrow_mut(|r| {
                 let text = keys::format(&r.keys);
@@ -255,6 +261,7 @@ unsafe fn paint(hwnd: HWND) {
     GetClientRect(hwnd, &mut rc);
 
     let recording = is_recording(hwnd);
+    let enabled = IsWindowEnabled(hwnd) != 0;
     let (text, placeholder) = if recording {
         let text = REC.with_borrow(|r| keys::format(&r.keys));
         if text.is_empty() {
@@ -271,7 +278,7 @@ unsafe fn paint(hwnd: HWND) {
         }
     };
 
-    FillRect(hdc, &rc, GetSysColorBrush(COLOR_WINDOW));
+    FillRect(hdc, &rc, GetSysColorBrush(if enabled { COLOR_WINDOW } else { COLOR_BTNFACE }));
     let border_color = if recording { COLOR_HIGHLIGHT } else { COLOR_BTNSHADOW };
     let border = GetSysColorBrush(border_color);
     FrameRect(hdc, &rc, border);
@@ -286,7 +293,7 @@ unsafe fn paint(hwnd: HWND) {
     SetBkMode(hdc, TRANSPARENT as i32);
     SetTextColor(
         hdc,
-        GetSysColor(if placeholder { COLOR_GRAYTEXT } else { COLOR_WINDOWTEXT }),
+        GetSysColor(if placeholder || !enabled { COLOR_GRAYTEXT } else { COLOR_WINDOWTEXT }),
     );
     let mut text_rc = rc;
     text_rc.left += ui::scale(8);
