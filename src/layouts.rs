@@ -190,7 +190,7 @@ mod tests {
     }
 
     fn order(id: &str, order: u32) -> LayoutOrder {
-        LayoutOrder { id: id.to_string(), order, enabled: true }
+        LayoutOrder::new(id.to_string(), order, true)
     }
 
     fn ids(layouts: &[Layout]) -> Vec<&str> {

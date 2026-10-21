@@ -19,6 +19,7 @@ const ID_NAV: i32 = 100;
 const ID_HOTKEY: i32 = 101;
 const ID_LAYOUTS: i32 = 102;
 const ID_BLOCK_HOTKEY: i32 = 103;
+const ID_HOTKEY_CLEAR: i32 = 104;
 /// Radio buttons for the switch modes, in `MODES` order.
 const ID_MODE_FIRST: i32 = 110;
 const ID_MODE_LAST: i32 = ID_MODE_FIRST + MODES.len() as i32 - 1;
@@ -53,6 +54,7 @@ struct Settings {
     nav: HWND,
     modes: [HWND; 3],
     hotkey: HWND,
+    hotkey_clear: HWND,
     block_hotkey: HWND,
     layouts: HWND,
     /// Static controls drawn in gray.
@@ -100,6 +102,7 @@ pub fn open(page: Page) {
     });
     show_mode(&modes, hotkey, config.switch_mode);
     ui::set_window_text(hotkey, &config.hotkey);
+    update_hotkey_clear();
     ui::set_checked(block_hotkey, config.block_hotkey);
 
     unsafe {
@@ -198,17 +201,16 @@ unsafe fn create() -> Option<Settings> {
     let modes: [HWND; 3] = std::array::from_fn(|i| {
         // The group starts at the first button: Tab lands on the checked one,
         // the arrow keys move between them.
-        let mut style = if i == 0 { WS_TABSTOP | WS_GROUP } else { 0 };
-        // TODO: enable the per-layout mode once it is implemented.
-        if MODES[i].0 == config::SwitchMode::PerLayout {
-            style |= WS_DISABLED;
-        }
+        let style = if i == 0 { WS_TABSTOP | WS_GROUP } else { 0 };
         let y = 92 + 26 * i as i32;
         child("BUTTON", MODES[i].1, style | BS_AUTORADIOBUTTON as u32, 0, CONTENT_X, y, CONTENT_W, 24, ID_MODE_FIRST + i as i32, font)
     });
     let hotkey_label = label("Layout switch hotkey:", 180, 20, font);
     let hotkey = child(
         hotkey_field::CLASS_NAME, "", WS_TABSTOP | WS_GROUP, 0, CONTENT_X, 204, 260, 30, ID_HOTKEY, font,
+    );
+    let hotkey_clear = child(
+        "BUTTON", "Clear", WS_TABSTOP | BS_PUSHBUTTON as u32, 0, CONTENT_X + 268, 204, 80, 30, ID_HOTKEY_CLEAR, font,
     );
     let hotkey_hint = label(
         "Click the field and press a new key combination. \
@@ -242,13 +244,14 @@ unsafe fn create() -> Option<Settings> {
         nav,
         modes,
         hotkey,
+        hotkey_clear,
         block_hotkey,
         layouts,
         secondary: vec![hotkey_hint, block_hotkey_hint, version, license],
         pages: [
             vec![
                 general_title, mode_label, modes[0], modes[1], modes[2],
-                hotkey_label, hotkey, hotkey_hint, block_hotkey, block_hotkey_hint,
+                hotkey_label, hotkey, hotkey_clear, hotkey_hint, block_hotkey, block_hotkey_hint,
             ],
             vec![layouts_title, layouts_label, layouts],
             vec![about_title, version, description, author, license],
@@ -257,19 +260,83 @@ unsafe fn create() -> Option<Settings> {
     })
 }
 
-fn on_layouts_changed(list: HWND) {
-    let order = reorder_list::entries(list)
+/// The layouts as the list shows them, keeping the hotkeys from `old`.
+fn order_from_list(list: HWND, old: &[config::LayoutOrder]) -> Vec<config::LayoutOrder> {
+    reorder_list::entries(list)
         .into_iter()
         .zip(1..)
-        .map(|((id, enabled), order)| config::LayoutOrder { id, order, enabled })
-        .collect();
+        .map(|((id, enabled), order)| match old.iter().find(|o| o.id == id) {
+            Some(o) => config::LayoutOrder { order, enabled, ..o.clone() },
+            None => config::LayoutOrder::new(id, order, enabled),
+        })
+        .collect()
+}
+
+fn on_layouts_changed(list: HWND) {
     let result = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut()?;
-        s.config.layouts = order;
+        s.config.layouts = order_from_list(list, &s.config.layouts);
         Some((s.hwnd, save(&s.config)))
     });
     if let Some((hwnd, Err(err))) = result {
         show_save_error(hwnd, &err);
+    }
+}
+
+/// If `hotkey` is already used by something other than `owner`, returns
+/// a message saying by what.
+pub fn hotkey_clash(hotkey: &str, owner: &config::HotkeyOwner) -> Option<String> {
+    let user = SETTINGS.with_borrow(|s| s.as_ref()?.config.hotkey_user(hotkey, owner))?;
+    let what = match user {
+        config::HotkeyOwner::Main => "the layout switch hotkey on the General page".to_string(),
+        config::HotkeyOwner::Layout(id) => {
+            let name = layouts::system().into_iter().find(|l| l.id == id).map_or(id, |l| l.name);
+            format!("the hotkey of the layout \u{201C}{name}\u{201D}")
+        }
+    };
+    Some(format!("{hotkey} is already used as {what}.\n\nOne key combination can't do two things; choose another one."))
+}
+
+pub fn show_hotkey_clash(hwnd: HWND, message: &str) {
+    let message = ui::wide(message);
+    let caption = ui::wide(APP_NAME);
+    unsafe { MessageBoxW(hwnd, message.as_ptr(), caption.as_ptr(), MB_ICONWARNING | MB_OK) };
+}
+
+/// The hotkey of a layout and whether it is turned on.
+pub fn layout_hotkey(id: &str) -> (String, bool) {
+    SETTINGS
+        .with_borrow(|s| {
+            let l = s.as_ref()?.config.layouts.iter().find(|l| l.id == id)?;
+            Some((l.hotkey.clone(), l.hotkey_enabled))
+        })
+        .unwrap_or_else(|| (String::new(), true))
+}
+
+/// Saves the hotkey of a layout. Returns false if saving failed (the error
+/// is shown over `dialog`).
+pub fn set_layout_hotkey(dialog: HWND, id: &str, hotkey: &str, enabled: bool) -> bool {
+    let result = SETTINGS.with_borrow_mut(|s| {
+        let s = s.as_mut()?;
+        // A layout gets its config entry once the order is saved; until then
+        // take the order the list shows.
+        let saved = s.config.layouts.clone();
+        s.config.layouts = order_from_list(s.layouts, &s.config.layouts);
+        let layout = s.config.layouts.iter_mut().find(|l| l.id == id)?;
+        layout.hotkey = hotkey.to_string();
+        layout.hotkey_enabled = enabled;
+        let result = save(&s.config);
+        if result.is_err() {
+            s.config.layouts = saved;
+        }
+        Some(result)
+    });
+    match result {
+        Some(Err(err)) => {
+            show_save_error(dialog, &err);
+            false
+        }
+        _ => true,
     }
 }
 
@@ -286,8 +353,37 @@ fn show_save_error(hwnd: HWND, err: &std::io::Error) {
     unsafe { MessageBoxW(hwnd, message.as_ptr(), caption.as_ptr(), MB_ICONERROR | MB_OK) };
 }
 
+fn update_hotkey_clear() {
+    if let Some((hotkey, clear)) = SETTINGS.with_borrow(|s| s.as_ref().map(|s| (s.hotkey, s.hotkey_clear))) {
+        ui::update_clear_button(hotkey, clear);
+    }
+}
+
+fn on_hotkey_cleared() {
+    if let Some(hotkey) = SETTINGS.with_borrow(|s| s.as_ref().map(|s| s.hotkey)) {
+        ui::set_window_text(hotkey, "");
+        on_hotkey_changed(hotkey);
+        // The button turns disabled now; don't leave the focus on it.
+        unsafe { SetFocus(hotkey) };
+    }
+}
+
 fn on_hotkey_changed(hotkey: HWND) {
+    save_hotkey(hotkey);
+    update_hotkey_clear();
+}
+
+fn save_hotkey(hotkey: HWND) {
     let text = ui::window_text(hotkey);
+    if let Some(message) = hotkey_clash(&text, &config::HotkeyOwner::Main) {
+        let (hwnd, saved) = SETTINGS.with_borrow(|s| {
+            let s = s.as_ref().unwrap();
+            (s.hwnd, s.config.hotkey.clone())
+        });
+        ui::set_window_text(hotkey, &saved);
+        show_hotkey_clash(hwnd, &message);
+        return;
+    }
     let result = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut()?;
         let saved = std::mem::replace(&mut s.config.hotkey, text);
@@ -327,6 +423,7 @@ fn on_mode_changed(index: usize) {
     let Some((hwnd, modes, hotkey, mode, result)) = result else { return };
     // Show what is actually in the config.
     show_mode(&modes, hotkey, mode);
+    update_hotkey_clear();
     if let Err(err) = result {
         show_save_error(hwnd, &err);
     }
@@ -401,12 +498,13 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     }
                 }
                 (ID_HOTKEY, hotkey_field::HFN_CHANGED) => on_hotkey_changed(lparam as HWND),
+                (ID_HOTKEY_CLEAR, BN_CLICKED) => on_hotkey_cleared(),
                 (ID_MODE_FIRST..=ID_MODE_LAST, BN_CLICKED) => on_mode_changed((id - ID_MODE_FIRST) as usize),
                 (ID_BLOCK_HOTKEY, BN_CLICKED) => on_block_hotkey_changed(lparam as HWND),
                 (ID_LAYOUTS, reorder_list::RLN_CHANGED) => on_layouts_changed(lparam as HWND),
                 (ID_LAYOUTS, reorder_list::RLN_MORE) => {
-                    if let Some((_, name)) = reorder_list::active_item(lparam as HWND) {
-                        layout_dialog::open(hwnd, &name);
+                    if let Some((id, name)) = reorder_list::active_item(lparam as HWND) {
+                        layout_dialog::open(hwnd, &id, &name);
                     }
                 }
                 _ => {}

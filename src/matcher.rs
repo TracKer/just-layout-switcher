@@ -1,4 +1,4 @@
-//! Recognizes the switch hotkey in the stream of keyboard events.
+//! Recognizes the switch hotkeys in the stream of keyboard events.
 //!
 //! A combination of modifiers only (e.g. "Alt + Shift") fires when one of its
 //! keys is released, provided that exactly these keys were held and nothing
@@ -14,8 +14,8 @@ use crate::keys;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Outcome {
-    /// Switch the layout.
-    pub fire: bool,
+    /// Index of the hotkey that fired.
+    pub fire: Option<usize>,
     /// Don't pass the event on.
     pub swallow: bool,
     /// Inject a dummy key so that the held Alt/Win (or the system language
@@ -31,9 +31,8 @@ pub struct Outcome {
 
 #[derive(Default)]
 pub struct Matcher {
-    /// Normalized keys of the hotkey, sorted; empty means no hotkey.
-    hotkey: Vec<u32>,
-    on_release: bool,
+    /// Normalized keys of each hotkey, sorted.
+    hotkeys: Vec<Vec<u32>>,
     block: bool,
     /// Raw keys currently held.
     held: Vec<u32>,
@@ -41,36 +40,31 @@ pub struct Matcher {
     /// swallowed too.
     swallowed: Vec<u32>,
     /// A modifier-only hotkey is held with nothing else pressed since.
-    armed: bool,
+    armed: Option<usize>,
     /// A hotkey with an ordinary key fired and its modifiers are still held.
     series: bool,
 }
 
 impl Matcher {
-    /// Sets the hotkey (normalized keys, see `keys::parse`) and whether a
+    /// Sets the hotkeys (normalized keys, see `keys::parse`) and whether a
     /// triggered hotkey is kept from the system and the active application.
-    pub fn set(&mut self, hotkey: Option<Vec<u32>>, block: bool) {
-        self.hotkey = hotkey.unwrap_or_default();
-        self.on_release = self.hotkey.iter().all(|&vk| keys::is_modifier(vk));
+    pub fn set(&mut self, hotkeys: Vec<Vec<u32>>, block: bool) {
+        self.hotkeys = hotkeys;
         self.block = block;
-        self.armed = false;
+        self.armed = None;
         self.series = false;
     }
 
-    pub fn has_hotkey(&self) -> bool {
-        !self.hotkey.is_empty()
-    }
-
-    /// True if the hotkey fires on release, so mouse clicks matter.
+    /// True if some hotkey fires on release, so mouse clicks matter.
     pub fn fires_on_release(&self) -> bool {
-        self.has_hotkey() && self.on_release
+        (0..self.hotkeys.len()).any(|i| self.on_release(i))
     }
 
     /// Forgets the keyboard state, e.g. when events were not seen.
     pub fn reset(&mut self) {
         self.held.clear();
         self.swallowed.clear();
-        self.armed = false;
+        self.armed = None;
         self.series = false;
     }
 
@@ -82,7 +76,7 @@ impl Matcher {
     }
 
     pub fn mouse_down(&mut self) {
-        self.armed = false;
+        self.armed = None;
     }
 
     pub fn key_down(&mut self, vk: u32) -> Outcome {
@@ -93,25 +87,29 @@ impl Matcher {
         if !repeat {
             self.held.push(vk);
         }
-        if self.hotkey.is_empty() {
-            return Outcome::default();
-        }
 
-        let matches = self.held_set() == self.hotkey;
-        if self.on_release {
-            self.armed = matches && (self.armed || !repeat);
+        let held = self.held_set();
+        let Some(index) = self.hotkeys.iter().position(|h| *h == held) else {
+            self.armed = None;
+            return Outcome::default();
+        };
+        if self.on_release(index) {
+            // Auto-repeat keeps the hotkey armed but doesn't arm it again
+            // after it was cancelled.
+            self.armed = (self.armed == Some(index) || !repeat).then_some(index);
             return Outcome::default();
         }
-        if repeat || !matches || keys::is_modifier(keys::normalize(vk)) {
+        self.armed = None;
+        if repeat || keys::is_modifier(keys::normalize(vk)) {
             return Outcome::default();
         }
         let continues = std::mem::replace(&mut self.series, true);
         if !self.block {
-            return Outcome { fire: true, continues, ..Default::default() };
+            return Outcome { fire: Some(index), continues, ..Default::default() };
         }
         self.swallowed.push(vk);
-        let mask = self.held_set().iter().any(|&k| k == keys::VK_ALT || k == keys::VK_WIN);
-        Outcome { fire: true, swallow: true, mask, replay: false, continues }
+        let mask = held.iter().any(|&k| k == keys::VK_ALT || k == keys::VK_WIN);
+        Outcome { fire: Some(index), swallow: true, mask, replay: false, continues }
     }
 
     pub fn key_up(&mut self, vk: u32) -> Outcome {
@@ -124,14 +122,20 @@ impl Matcher {
             self.swallowed.remove(pos);
             return Outcome { swallow: true, ..Default::default() };
         }
-        let armed = std::mem::take(&mut self.armed);
-        if !armed || !self.hotkey.contains(&keys::normalize(vk)) {
+        let Some(index) = self.armed.take() else {
+            return Outcome::default();
+        };
+        if !self.hotkeys[index].contains(&normalized) {
             return Outcome::default();
         }
         if !self.block {
-            return Outcome { fire: true, ..Default::default() };
+            return Outcome { fire: Some(index), ..Default::default() };
         }
-        Outcome { fire: true, swallow: true, mask: true, replay: true, continues: false }
+        Outcome { fire: Some(index), swallow: true, mask: true, replay: true, continues: false }
+    }
+
+    fn on_release(&self, index: usize) -> bool {
+        self.hotkeys[index].iter().all(|&vk| keys::is_modifier(vk))
     }
 
     fn held_set(&self) -> Vec<u32> {
@@ -156,12 +160,12 @@ mod tests {
 
     fn matcher(hotkey: &str, block: bool) -> Matcher {
         let mut m = Matcher::default();
-        m.set(keys::parse(hotkey), block);
+        m.set(keys::parse(hotkey).into_iter().collect(), block);
         m
     }
 
     fn fired(o: Outcome) -> bool {
-        o.fire
+        o.fire.is_some()
     }
 
     #[test]
@@ -170,7 +174,7 @@ mod tests {
         assert!(!fired(m.key_down(LALT)));
         assert!(!fired(m.key_down(LSHIFT)));
         assert!(!fired(m.key_down(LSHIFT))); // auto-repeat
-        assert_eq!(m.key_up(LSHIFT), Outcome { fire: true, ..Default::default() });
+        assert_eq!(m.key_up(LSHIFT), Outcome { fire: Some(0), ..Default::default() });
         assert!(!fired(m.key_up(LALT)));
     }
 
@@ -212,7 +216,7 @@ mod tests {
         let mut m = matcher("Alt + Shift", true);
         m.key_down(LALT);
         m.key_down(LSHIFT);
-        assert_eq!(m.key_up(LSHIFT), Outcome { fire: true, swallow: true, mask: true, replay: true, continues: false });
+        assert_eq!(m.key_up(LSHIFT), Outcome { fire: Some(0), swallow: true, mask: true, replay: true, continues: false });
         assert_eq!(m.key_up(LALT), Outcome::default());
     }
 
@@ -241,7 +245,7 @@ mod tests {
         m.key_up(LALT);
         m.key_down(LALT);
         let o = m.key_down(L);
-        assert!(o.fire && !o.continues);
+        assert!(o.fire.is_some() && !o.continues);
     }
 
     #[test]
@@ -271,7 +275,7 @@ mod tests {
         let mut m = matcher("Ctrl + Alt + L", true);
         m.key_down(LCTRL);
         m.key_down(LALT);
-        assert_eq!(m.key_down(L), Outcome { fire: true, swallow: true, mask: true, replay: false, continues: false });
+        assert_eq!(m.key_down(L), Outcome { fire: Some(0), swallow: true, mask: true, replay: false, continues: false });
         assert_eq!(m.key_down(L), Outcome { swallow: true, ..Default::default() });
         assert_eq!(m.key_up(L), Outcome { swallow: true, ..Default::default() });
         assert_eq!(m.key_up(LALT), Outcome::default());
@@ -281,7 +285,7 @@ mod tests {
     fn blocked_key_hotkey_without_alt_or_win_needs_no_mask() {
         let mut m = matcher("Ctrl + L", true);
         m.key_down(LCTRL);
-        assert_eq!(m.key_down(L), Outcome { fire: true, swallow: true, mask: false, replay: false, continues: false });
+        assert_eq!(m.key_down(L), Outcome { fire: Some(0), swallow: true, mask: false, replay: false, continues: false });
     }
 
     #[test]
@@ -302,6 +306,29 @@ mod tests {
         m.forget_released(|_| false);
         m.key_down(LCTRL);
         assert!(fired(m.key_down(L)));
+    }
+
+    #[test]
+    fn several_hotkeys_report_which_one_fired() {
+        let mut m = Matcher::default();
+        let hotkeys = ["Ctrl + Shift", "Ctrl + Shift + 1", "Ctrl + 2"];
+        m.set(hotkeys.iter().filter_map(|h| keys::parse(h)).collect(), false);
+        let one = b'1' as u32;
+        let two = b'2' as u32;
+
+        m.key_down(LCTRL);
+        m.key_down(LSHIFT);
+        assert_eq!(m.key_down(one).fire, Some(1));
+        m.key_up(one);
+        // Ctrl+Shift was cancelled by the 1 in between.
+        assert_eq!(m.key_up(LSHIFT).fire, None);
+        assert_eq!(m.key_down(two).fire, Some(2));
+        m.key_up(two);
+        m.key_up(LCTRL);
+
+        m.key_down(LCTRL);
+        m.key_down(LSHIFT);
+        assert_eq!(m.key_up(LCTRL).fire, Some(0));
     }
 
     #[test]

@@ -5,10 +5,12 @@
 //! injection happen in a message-only window, so the hook returns quickly
 //! (Windows silently drops hooks that are too slow).
 //!
-//! The next layout is taken from our own list: the configured order, skipping
-//! disabled layouts and wrapping around from the last to the first. It is
-//! requested from the focused window with `WM_INPUTLANGCHANGEREQUEST`, the
-//! same way the system hotkey does it.
+//! The layout is taken from our own list: the configured order without the
+//! disabled layouts. Depending on the mode it is the next one (wrapping
+//! around from the last to the first), the N-th one for N presses in a row,
+//! or the one whose own hotkey was pressed. It is requested from the focused
+//! window with `WM_INPUTLANGCHANGEREQUEST`, the same way the system hotkey
+//! does it.
 
 use crate::{config, hotkey_field, keys, layouts, matcher::Matcher, ui};
 use std::cell::RefCell;
@@ -21,7 +23,8 @@ use windows_sys::Win32::{
 };
 
 const CLASS_NAME: &str = "JlsSwitcher";
-/// wParam: 1 if the hotkey fired with its modifiers held since the last time.
+/// wParam: 1 if the hotkey fired with its modifiers held since the last time;
+/// lParam: index of the hotkey that fired.
 const WM_SWITCH: u32 = WM_APP + 20;
 /// wParam: vk of a key-up to replay after the mask (0 for none);
 /// lParam: its scan code, bit 16 set for an extended key.
@@ -39,11 +42,23 @@ const PENDING_MS: u32 = 500;
 /// goes on to the next layout; after a longer pause counting starts over.
 const SERIES_MS: u32 = 1000;
 
+#[derive(Clone, Copy)]
+enum Action {
+    /// The next enabled layout.
+    Cycle,
+    /// The N-th enabled layout for the N-th press in a row.
+    PressCount,
+    /// This very layout (HKL).
+    Layout(u32),
+}
+
 struct Switcher {
     window: HWND,
     keyboard_hook: HHOOK,
     mouse_hook: HHOOK,
     matcher: Matcher,
+    /// What each of the matcher's hotkeys does.
+    actions: Vec<Action>,
     config: config::Config,
     /// The last requested layout: (GUI thread, HKL, tick).
     pending: Option<(u32, u32, u32)>,
@@ -57,6 +72,7 @@ thread_local! {
         keyboard_hook: null_mut(),
         mouse_hook: null_mut(),
         matcher: Matcher::default(),
+        actions: Vec::new(),
         config: config::Config::default(),
         pending: None,
         series: None,
@@ -93,16 +109,36 @@ pub fn start(config: &config::Config) {
 
 /// Picks up a changed config.
 pub fn apply(config: &config::Config) {
-    // TODO: the per-layout mode is not implemented yet.
-    let active = config.switch_mode != config::SwitchMode::PerLayout;
-    let hotkey = active.then(|| keys::parse(&config.hotkey)).flatten();
+    let (hotkeys, actions) = hotkeys(config);
     let need_mouse = SWITCHER.with_borrow_mut(|s| {
         s.config = config.clone();
+        s.actions = actions;
         s.series = None;
-        s.matcher.set(hotkey, config.block_hotkey);
+        s.matcher.set(hotkeys, config.block_hotkey);
         s.matcher.fires_on_release()
     });
     set_mouse_hook(need_mouse);
+}
+
+/// The hotkeys tracked in the configured mode and what each one does.
+fn hotkeys(config: &config::Config) -> (Vec<Vec<u32>>, Vec<Action>) {
+    match config.switch_mode {
+        config::SwitchMode::Cycle => keys::parse(&config.hotkey).map(|k| (k, Action::Cycle)).into_iter().unzip(),
+        config::SwitchMode::PressCount => {
+            keys::parse(&config.hotkey).map(|k| (k, Action::PressCount)).into_iter().unzip()
+        }
+        // A layout's own hotkey works even if the layout is left out of
+        // the cycle; only turning the hotkey itself off stops it.
+        config::SwitchMode::PerLayout => config
+            .layouts
+            .iter()
+            .filter(|l| l.hotkey_enabled)
+            .filter_map(|l| {
+                let hkl = u32::from_str_radix(&l.id, 16).ok()?;
+                Some((keys::parse(&l.hotkey)?, Action::Layout(hkl)))
+            })
+            .unzip(),
+    }
 }
 
 pub fn stop() {
@@ -170,8 +206,8 @@ fn handle_key(kb: &KBDLLHOOKSTRUCT) -> bool {
     let Some((window, outcome)) = outcome else { return false };
 
     unsafe {
-        if outcome.fire {
-            PostMessageW(window, WM_SWITCH, outcome.continues as WPARAM, 0);
+        if let Some(index) = outcome.fire {
+            PostMessageW(window, WM_SWITCH, outcome.continues as WPARAM, index as LPARAM);
         }
         if outcome.mask {
             let (vk, scan) = if outcome.replay {
@@ -218,9 +254,9 @@ unsafe fn send_mask(replay_vk: u16, replay_scan: u32) {
     SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
 }
 
-/// Switches the foreground application to the layout picked by the mode:
-/// the next enabled one, or the N-th enabled one for the N-th press in a row.
-unsafe fn switch_layout(continues: bool) {
+/// Switches the foreground application to the layout picked by the action
+/// of the hotkey with this index.
+unsafe fn switch_layout(index: usize, continues: bool) {
     let foreground = GetForegroundWindow();
     if foreground.is_null() {
         return;
@@ -230,9 +266,12 @@ unsafe fn switch_layout(continues: bool) {
     let now = GetTickCount();
 
     let next = SWITCHER.with_borrow_mut(|s| {
+        // The config may have changed since the hotkey fired.
+        let action = *s.actions.get(index)?;
         let list = layouts::switch_order(&s.config.layouts);
-        match s.config.switch_mode {
-            config::SwitchMode::PressCount => {
+        match action {
+            Action::Layout(hkl) => list.iter().any(|&(l, _)| l == hkl).then_some(hkl),
+            Action::PressCount => {
                 let index = match s.series {
                     Some((last, tick)) if continues || now.wrapping_sub(tick) < SERIES_MS => last + 1,
                     _ => 0,
@@ -240,7 +279,7 @@ unsafe fn switch_layout(continues: bool) {
                 s.series = Some((index, now));
                 layouts::nth_enabled(&list, index)
             }
-            _ => {
+            Action::Cycle => {
                 // Quick repeated presses may come before the window has
                 // processed the previous request; go on from what was
                 // requested then.
@@ -271,7 +310,7 @@ unsafe fn switch_layout(continues: bool) {
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_SWITCH => {
-            switch_layout(wparam != 0);
+            switch_layout(lparam as usize, wparam != 0);
             0
         }
         WM_MASK => {
