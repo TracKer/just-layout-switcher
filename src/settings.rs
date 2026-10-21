@@ -18,6 +18,7 @@ pub const APP_NAME: &str = "Just Layout Switcher";
 const ID_NAV: i32 = 100;
 const ID_HOTKEY: i32 = 101;
 const ID_LAYOUTS: i32 = 102;
+const ID_BLOCK_HOTKEY: i32 = 103;
 
 const CLIENT_W: i32 = 580;
 const CLIENT_H: i32 = 360;
@@ -42,6 +43,7 @@ struct Settings {
     hwnd: HWND,
     nav: HWND,
     hotkey: HWND,
+    block_hotkey: HWND,
     layouts: HWND,
     /// Static controls drawn in gray.
     secondary: Vec<HWND>,
@@ -80,12 +82,13 @@ pub fn open(page: Page) {
 
     // Pick up manual edits of the config file.
     let config = config::load();
-    let (hwnd, nav, hotkey) = SETTINGS.with_borrow_mut(|s| {
+    let (hwnd, nav, hotkey, block_hotkey) = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut().unwrap();
         s.config = config.clone();
-        (s.hwnd, s.nav, s.hotkey)
+        (s.hwnd, s.nav, s.hotkey, s.block_hotkey)
     });
     ui::set_window_text(hotkey, &config.hotkey);
+    ui::set_checked(block_hotkey, config.block_hotkey);
 
     unsafe {
         SendMessageW(nav, LB_SETCURSEL, page as usize, 0);
@@ -186,6 +189,15 @@ unsafe fn create() -> Option<Settings> {
          It is saved as soon as any of the keys is released.",
         132, 40, font,
     );
+    let block_hotkey = child(
+        "BUTTON", "Block the hotkey after switching",
+        WS_TABSTOP | BS_AUTOCHECKBOX as u32, 0, CONTENT_X, 184, CONTENT_W, 24, ID_BLOCK_HOTKEY, font,
+    );
+    let block_hotkey_hint = label(
+        "When on, the key combination is not passed on to the active application. \
+         When off, it is passed on after switching.",
+        212, 40, font,
+    );
 
     // Layouts
     let layouts_title = label("Layouts", MARGIN, 36, title_font);
@@ -203,10 +215,11 @@ unsafe fn create() -> Option<Settings> {
         hwnd,
         nav,
         hotkey,
+        block_hotkey,
         layouts,
-        secondary: vec![hotkey_hint, version, license],
+        secondary: vec![hotkey_hint, block_hotkey_hint, version, license],
         pages: [
-            vec![general_title, hotkey_label, hotkey, hotkey_hint],
+            vec![general_title, hotkey_label, hotkey, hotkey_hint, block_hotkey, block_hotkey_hint],
             vec![layouts_title, layouts_label, layouts],
             vec![about_title, version, description, author, license],
         ],
@@ -250,6 +263,23 @@ fn on_hotkey_changed(hotkey: HWND) {
     if let Some((hwnd, saved, Err(err))) = result {
         // Show what is actually in the config.
         ui::set_window_text(hotkey, &saved);
+        show_save_error(hwnd, &err);
+    }
+}
+
+fn on_block_hotkey_changed(checkbox: HWND) {
+    let block = ui::is_checked(checkbox);
+    let result = SETTINGS.with_borrow_mut(|s| {
+        let s = s.as_mut()?;
+        s.config.block_hotkey = block;
+        let result = config::save(&s.config);
+        if result.is_err() {
+            s.config.block_hotkey = !block;
+        }
+        Some((s.hwnd, result))
+    });
+    if let Some((hwnd, Err(err))) = result {
+        ui::set_checked(checkbox, !block);
         show_save_error(hwnd, &err);
     }
 }
@@ -306,6 +336,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     }
                 }
                 (ID_HOTKEY, hotkey_field::HFN_CHANGED) => on_hotkey_changed(lparam as HWND),
+                (ID_BLOCK_HOTKEY, BN_CLICKED) => on_block_hotkey_changed(lparam as HWND),
                 (ID_LAYOUTS, reorder_list::RLN_CHANGED) => on_layouts_changed(lparam as HWND),
                 (ID_LAYOUTS, reorder_list::RLN_MORE) => {
                     if let Some((_, name)) = reorder_list::active_item(lparam as HWND) {

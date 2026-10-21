@@ -8,6 +8,9 @@ const FILE_NAME: &str = "config.yaml";
 pub struct Config {
     /// Human-readable key combination, e.g. "Ctrl + Shift".
     pub hotkey: String,
+    /// Swallow the hotkey after switching instead of passing it on to the
+    /// focused application and other hooks.
+    pub block_hotkey: bool,
     /// User-defined switching order; empty means the system order.
     pub layouts: Vec<LayoutOrder>,
 }
@@ -31,6 +34,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: "Alt + Shift".to_string(),
+            block_hotkey: true,
             layouts: Vec::new(),
         }
     }

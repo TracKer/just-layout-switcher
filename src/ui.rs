@@ -2,7 +2,8 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use windows_sys::Win32::{
-    Foundation::*, Graphics::Gdi::*, UI::HiDpi::GetDpiForSystem, UI::WindowsAndMessaging::*,
+    Foundation::*, Graphics::Gdi::*, UI::Controls::{BST_CHECKED, BST_UNCHECKED}, UI::HiDpi::GetDpiForSystem,
+    UI::WindowsAndMessaging::*,
 };
 
 static DPI: AtomicU32 = AtomicU32::new(96);
@@ -75,6 +76,15 @@ pub fn window_text(hwnd: HWND) -> String {
 
 pub fn set_window_text(hwnd: HWND, text: &str) {
     unsafe { SetWindowTextW(hwnd, wide(text).as_ptr()) };
+}
+
+pub fn is_checked(checkbox: HWND) -> bool {
+    unsafe { SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED as LRESULT }
+}
+
+pub fn set_checked(checkbox: HWND, checked: bool) {
+    let state = if checked { BST_CHECKED } else { BST_UNCHECKED };
+    unsafe { SendMessageW(checkbox, BM_SETCHECK, state as usize, 0) };
 }
 
 /// The system UI font, optionally enlarged and/or bold.
