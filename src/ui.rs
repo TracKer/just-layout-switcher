@@ -3,7 +3,6 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use windows_sys::Win32::{
     Foundation::*, Graphics::Gdi::*, UI::Controls::{BST_CHECKED, BST_UNCHECKED}, UI::HiDpi::GetDpiForSystem,
-    UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled},
     UI::WindowsAndMessaging::*,
 };
 
@@ -86,13 +85,6 @@ pub fn is_checked(checkbox: HWND) -> bool {
 pub fn set_checked(checkbox: HWND, checked: bool) {
     let state = if checked { BST_CHECKED } else { BST_UNCHECKED };
     unsafe { SendMessageW(checkbox, BM_SETCHECK, state as usize, 0) };
-}
-
-/// A "Clear" button next to a hotkey field is available only when there is
-/// something to clear and the field itself is enabled.
-pub fn update_clear_button(field: HWND, button: HWND) {
-    let enabled = unsafe { IsWindowEnabled(field) } != 0 && !window_text(field).is_empty();
-    unsafe { EnableWindow(button, enabled as BOOL) };
 }
 
 /// The system UI font, optionally enlarged and/or bold.

@@ -35,7 +35,6 @@ struct Dialog {
     /// Id of the layout being edited.
     id: String,
     hotkey: HWND,
-    hotkey_clear: HWND,
     hotkey_enabled: HWND,
     /// Static controls drawn in gray.
     secondary: Vec<HWND>,
@@ -119,7 +118,7 @@ pub fn open(owner: HWND, id: &str, layout_name: &str) {
         };
         child("STATIC", "Hotkey for this layout:", SS_NOPREFIX, MARGIN, MARGIN, CLIENT_W - 2 * MARGIN, 20, 0);
         let hotkey = child(hotkey_field::CLASS_NAME, &hotkey_text, WS_TABSTOP, MARGIN, 40, FIELD_W, 30, ID_HOTKEY);
-        let hotkey_clear = child(
+        child(
             "BUTTON", "Clear", WS_TABSTOP | BS_PUSHBUTTON as u32,
             MARGIN + FIELD_W + 8, 40, CLEAR_W, 30, ID_HOTKEY_CLEAR,
         );
@@ -148,14 +147,12 @@ pub fn open(owner: HWND, id: &str, layout_name: &str) {
         );
         ui::set_checked(hotkey_enabled, enabled);
         EnableWindow(hotkey, enabled as BOOL);
-        ui::update_clear_button(hotkey, hotkey_clear);
 
         DIALOG.with_borrow_mut(|d| {
             *d = Some(Dialog {
                 hwnd,
                 id: id.to_string(),
                 hotkey,
-                hotkey_clear,
                 hotkey_enabled,
                 secondary: vec![hint],
                 accepted: hotkey_text,
@@ -195,13 +192,6 @@ fn on_hotkey_changed(hwnd: HWND) {
             }
         }),
     }
-    update_clear();
-}
-
-fn update_clear() {
-    if let Some((hotkey, clear)) = DIALOG.with_borrow(|d| d.as_ref().map(|d| (d.hotkey, d.hotkey_clear))) {
-        ui::update_clear_button(hotkey, clear);
-    }
 }
 
 fn on_save(hwnd: HWND) {
@@ -226,8 +216,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     if let Some(hotkey) = DIALOG.with_borrow(|d| d.as_ref().map(|d| d.hotkey)) {
                         ui::set_window_text(hotkey, "");
                         on_hotkey_changed(hwnd);
-                        // The button turns disabled now; don't leave the focus on it.
-                        SetFocus(hotkey);
                     }
                 }
                 (ID_HOTKEY_ENABLED, BN_CLICKED) => {
@@ -235,7 +223,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     if let Some(hotkey) = DIALOG.with_borrow(|d| d.as_ref().map(|d| d.hotkey)) {
                         EnableWindow(hotkey, enabled as BOOL);
                     }
-                    update_clear();
                 }
                 _ => {}
             }

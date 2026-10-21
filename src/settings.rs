@@ -54,7 +54,6 @@ struct Settings {
     nav: HWND,
     modes: [HWND; 3],
     hotkey: HWND,
-    hotkey_clear: HWND,
     block_hotkey: HWND,
     layouts: HWND,
     /// Static controls drawn in gray.
@@ -102,7 +101,6 @@ pub fn open(page: Page) {
     });
     show_mode(&modes, hotkey, config.switch_mode);
     ui::set_window_text(hotkey, &config.hotkey);
-    update_hotkey_clear();
     ui::set_checked(block_hotkey, config.block_hotkey);
 
     unsafe {
@@ -244,7 +242,6 @@ unsafe fn create() -> Option<Settings> {
         nav,
         modes,
         hotkey,
-        hotkey_clear,
         block_hotkey,
         layouts,
         secondary: vec![hotkey_hint, block_hotkey_hint, version, license],
@@ -353,27 +350,14 @@ fn show_save_error(hwnd: HWND, err: &std::io::Error) {
     unsafe { MessageBoxW(hwnd, message.as_ptr(), caption.as_ptr(), MB_ICONERROR | MB_OK) };
 }
 
-fn update_hotkey_clear() {
-    if let Some((hotkey, clear)) = SETTINGS.with_borrow(|s| s.as_ref().map(|s| (s.hotkey, s.hotkey_clear))) {
-        ui::update_clear_button(hotkey, clear);
-    }
-}
-
 fn on_hotkey_cleared() {
     if let Some(hotkey) = SETTINGS.with_borrow(|s| s.as_ref().map(|s| s.hotkey)) {
         ui::set_window_text(hotkey, "");
         on_hotkey_changed(hotkey);
-        // The button turns disabled now; don't leave the focus on it.
-        unsafe { SetFocus(hotkey) };
     }
 }
 
 fn on_hotkey_changed(hotkey: HWND) {
-    save_hotkey(hotkey);
-    update_hotkey_clear();
-}
-
-fn save_hotkey(hotkey: HWND) {
     let text = ui::window_text(hotkey);
     if let Some(message) = hotkey_clash(&text, &config::HotkeyOwner::Main) {
         let (hwnd, saved) = SETTINGS.with_borrow(|s| {
@@ -423,7 +407,6 @@ fn on_mode_changed(index: usize) {
     let Some((hwnd, modes, hotkey, mode, result)) = result else { return };
     // Show what is actually in the config.
     show_mode(&modes, hotkey, mode);
-    update_hotkey_clear();
     if let Err(err) = result {
         show_save_error(hwnd, &err);
     }
