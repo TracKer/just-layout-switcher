@@ -61,6 +61,11 @@ const TIMER_RESTORE: usize = 3;
 /// The application reads the clipboard when it gets Ctrl+V; give it this
 /// long before the previous contents are put back.
 const RESTORE_DELAY_MS: u32 = 500;
+const TIMER_LAYOUT_CHECK: usize = 4;
+/// How often to check that the window has switched to the requested layout
+/// after a paste, and for how long; the request is repeated if it hasn't.
+const LAYOUT_CHECK_MS: u32 = 50;
+const LAYOUT_CHECK_FOR_MS: u32 = 600;
 
 /// How long a requested layout is assumed to be the current one while the
 /// target window hasn't processed the request yet.
@@ -69,7 +74,7 @@ const PENDING_MS: u32 = 500;
 /// goes on to the next layout; after a longer pause counting starts over.
 const SERIES_MS: u32 = 1000;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Action {
     /// The next enabled layout.
     Cycle,
@@ -123,6 +128,9 @@ struct Switcher {
     selection: Option<Selection>,
     /// The clipboard contents to put back after a paste.
     restore: Option<clipboard::Backup>,
+    /// A layout requested after a paste and still to be confirmed:
+    /// (foreground window, its GUI thread, HKL, when it was requested).
+    layout_check: Option<(HWND, u32, u32, u32)>,
 }
 
 thread_local! {
@@ -139,6 +147,7 @@ thread_local! {
         correction: None,
         selection: None,
         restore: None,
+        layout_check: None,
     });
 }
 
@@ -466,23 +475,25 @@ unsafe fn on_correction_timer(window: HWND) {
 unsafe fn send_released(inputs: Vec<INPUT>, held: &[u32]) {
     let modifiers: Vec<u16> =
         held.iter().filter(|&&vk| keys::is_modifier(keys::normalize(vk))).map(|&vk| vk as u16).collect();
-    let modifier_flags = |vk: u16| match vk {
-        VK_RCONTROL | VK_RMENU | VK_LWIN | VK_RWIN => KEYEVENTF_EXTENDEDKEY,
-        _ => 0,
+    let modifier_input = |vk: u16, up: bool| {
+        let extended = matches!(vk, VK_RCONTROL | VK_RMENU | VK_LWIN | VK_RWIN);
+        let flags = if extended { KEYEVENTF_EXTENDEDKEY } else { 0 } | if up { KEYEVENTF_KEYUP } else { 0 };
+        key_input(vk, MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) as u16, flags)
     };
-    // Releasing (and later pressing) Alt or Win alone opens a menu.
-    let mask = modifiers.iter().any(|&vk| matches!(keys::normalize(vk as u32), keys::VK_ALT | keys::VK_WIN));
+    // Releasing and pressing modifiers alone can count as a tap: Alt or Win
+    // opens a menu, Ctrl+Shift or Alt+Shift switches the layout back.
+    let mask = !modifiers.is_empty();
 
     let mut all = Vec::new();
     if mask {
         all.extend([key_input(VK_MASK, 0, 0), key_input(VK_MASK, 0, KEYEVENTF_KEYUP)]);
     }
     for &vk in &modifiers {
-        all.push(key_input(vk, 0, KEYEVENTF_KEYUP | modifier_flags(vk)));
+        all.push(modifier_input(vk, true));
     }
     all.extend(inputs);
     for &vk in &modifiers {
-        all.push(key_input(vk, 0, modifier_flags(vk)));
+        all.push(modifier_input(vk, false));
     }
     if mask {
         all.extend([key_input(VK_MASK, 0, 0), key_input(VK_MASK, 0, KEYEVENTF_KEYUP)]);
@@ -610,6 +621,32 @@ unsafe fn on_selection_timer(window: HWND) {
     send_ctrl(b'V' as u16);
     SWITCHER.with_borrow_mut(|s| s.restore = Some(selection.backup));
     SetTimer(window, TIMER_RESTORE, RESTORE_DELAY_MS, None);
+    if selection.action == Action::SelectionLayout {
+        let hkl = SWITCHER.with_borrow(|s| s.pending.map(|(_, hkl, _)| hkl));
+        if let Some(hkl) = hkl {
+            SWITCHER.with_borrow_mut(|s| s.layout_check = Some((selection.foreground, selection.thread, hkl, now)));
+            SetTimer(window, TIMER_LAYOUT_CHECK, LAYOUT_CHECK_MS, None);
+        }
+    }
+}
+
+/// The window may be busy with the copy and paste and miss the layout
+/// request, or the layout may be switched back when the user releases the
+/// hotkey's modifiers; ask again while that can still happen.
+unsafe fn on_layout_check_timer(window: HWND) {
+    let Some((foreground, thread, hkl, started)) = SWITCHER.with_borrow(|s| s.layout_check) else {
+        KillTimer(window, TIMER_LAYOUT_CHECK);
+        return;
+    };
+    let now = GetTickCount();
+    if now.wrapping_sub(started) >= LAYOUT_CHECK_FOR_MS || GetForegroundWindow() != foreground {
+        KillTimer(window, TIMER_LAYOUT_CHECK);
+        SWITCHER.with_borrow_mut(|s| s.layout_check = None);
+        return;
+    }
+    if GetKeyboardLayout(thread) as usize as u32 != hkl {
+        request_layout(foreground, thread, hkl, now);
+    }
 }
 
 /// Puts back the clipboard contents saved before a paste, if any.
@@ -636,6 +673,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         WM_TIMER if wparam == TIMER_RESTORE => {
             finish_restore(hwnd);
+            0
+        }
+        WM_TIMER if wparam == TIMER_LAYOUT_CHECK => {
+            on_layout_check_timer(hwnd);
             0
         }
         WM_MASK => {
