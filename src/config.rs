@@ -14,6 +14,10 @@ pub struct Config {
     pub block_hotkey: bool,
     /// Retypes the last word in the next layout; empty if none.
     pub correction_hotkey: String,
+    /// Converts the selected text to the next layout; empty if none.
+    pub selection_layout_hotkey: String,
+    /// Inverts the case of the selected text; empty if none.
+    pub selection_case_hotkey: String,
     /// User-defined switching order; empty means the system order.
     pub layouts: Vec<LayoutOrder>,
 }
@@ -75,6 +79,10 @@ pub enum HotkeyOwner {
     Layout(String),
     /// The last word correction hotkey on the Correction page.
     Correction,
+    /// The selection layout hotkey on the Correction page.
+    SelectionLayout,
+    /// The selection case hotkey on the Correction page.
+    SelectionCase,
 }
 
 impl Config {
@@ -85,11 +93,14 @@ impl Config {
     pub fn hotkey_user(&self, hotkey: &str, owner: &HotkeyOwner) -> Option<HotkeyOwner> {
         let keys = crate::keys::parse(hotkey)?;
         let same = |text: &str| crate::keys::parse(text).as_ref() == Some(&keys);
-        if *owner != HotkeyOwner::Main && same(&self.hotkey) {
-            return Some(HotkeyOwner::Main);
-        }
-        if *owner != HotkeyOwner::Correction && same(&self.correction_hotkey) {
-            return Some(HotkeyOwner::Correction);
+        let fixed = [
+            (HotkeyOwner::Main, &self.hotkey),
+            (HotkeyOwner::Correction, &self.correction_hotkey),
+            (HotkeyOwner::SelectionLayout, &self.selection_layout_hotkey),
+            (HotkeyOwner::SelectionCase, &self.selection_case_hotkey),
+        ];
+        if let Some((user, _)) = fixed.into_iter().find(|(user, text)| user != owner && same(text)) {
+            return Some(user);
         }
         self.layouts
             .iter()
@@ -105,6 +116,8 @@ impl Default for Config {
             hotkey: "Alt + Shift".to_string(),
             block_hotkey: true,
             correction_hotkey: String::new(),
+            selection_layout_hotkey: String::new(),
+            selection_case_hotkey: String::new(),
             layouts: Vec::new(),
         }
     }
@@ -146,6 +159,7 @@ mod tests {
         let mut config = Config {
             hotkey: "Alt + Shift".to_string(),
             correction_hotkey: "Pause".to_string(),
+            selection_case_hotkey: "Ctrl + Pause".to_string(),
             ..Config::default()
         };
         let mut en = LayoutOrder::new("EN".to_string(), 1, true);
@@ -168,6 +182,8 @@ mod tests {
         assert_eq!(config.hotkey_user("Ctrl + 3", &de), None);
         assert_eq!(config.hotkey_user("Pause", &HotkeyOwner::Main), Some(HotkeyOwner::Correction));
         assert_eq!(config.hotkey_user("Alt + Shift", &HotkeyOwner::Correction), Some(HotkeyOwner::Main));
+        assert_eq!(config.hotkey_user("Ctrl + Pause", &de), Some(HotkeyOwner::SelectionCase));
+        assert_eq!(config.hotkey_user("Pause", &HotkeyOwner::SelectionLayout), Some(HotkeyOwner::Correction));
     }
 
     #[test]
@@ -184,6 +200,7 @@ mod tests {
         assert_eq!(config.hotkey_user("Alt + Shift", &HotkeyOwner::Main), None);
         assert_eq!(config.hotkey_user("Ctrl + 1", &HotkeyOwner::Layout("EN".to_string())), None);
         assert_eq!(config.hotkey_user("Pause", &HotkeyOwner::Correction), None);
+        assert_eq!(config.hotkey_user("Ctrl + Pause", &HotkeyOwner::SelectionCase), None);
     }
 
     #[test]

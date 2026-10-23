@@ -1,6 +1,8 @@
 #![windows_subsystem = "windows"]
 
+mod clipboard;
 mod config;
+mod convert;
 mod hotkey_field;
 mod icon;
 mod keys;

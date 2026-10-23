@@ -22,6 +22,10 @@ const ID_BLOCK_HOTKEY: i32 = 103;
 const ID_HOTKEY_CLEAR: i32 = 104;
 const ID_CORRECTION_HOTKEY: i32 = 105;
 const ID_CORRECTION_CLEAR: i32 = 106;
+const ID_SELECTION_LAYOUT_HOTKEY: i32 = 107;
+const ID_SELECTION_LAYOUT_CLEAR: i32 = 108;
+const ID_SELECTION_CASE_HOTKEY: i32 = 109;
+const ID_SELECTION_CASE_CLEAR: i32 = 113;
 /// Radio buttons for the switch modes, in `MODES` order.
 const ID_MODE_FIRST: i32 = 110;
 const ID_MODE_LAST: i32 = ID_MODE_FIRST + MODES.len() as i32 - 1;
@@ -36,7 +40,7 @@ const RECORD_HINT: &str = "Click the field and press a new key combination. \
      It is saved as soon as any of the keys is released.";
 
 const CLIENT_W: i32 = 580;
-const CLIENT_H: i32 = 400;
+const CLIENT_H: i32 = 464;
 const NAV_W: i32 = 160;
 const MARGIN: i32 = 16;
 const CONTENT_X: i32 = MARGIN + NAV_W + 24;
@@ -66,6 +70,8 @@ struct Settings {
     block_hotkey: HWND,
     layouts: HWND,
     correction_hotkey: HWND,
+    selection_layout_hotkey: HWND,
+    selection_case_hotkey: HWND,
     /// Static controls drawn in gray.
     secondary: Vec<HWND>,
     pages: [Vec<HWND>; 5],
@@ -104,15 +110,19 @@ pub fn open(page: Page) {
     // Pick up manual edits of the config file.
     let config = config::load();
     switcher::apply(&config);
-    let (hwnd, nav, modes, hotkey, block_hotkey, correction_hotkey) = SETTINGS.with_borrow_mut(|s| {
+    let (hwnd, nav, modes, hotkey, block_hotkey, fields) = SETTINGS.with_borrow_mut(|s| {
         let s = s.as_mut().unwrap();
         s.config = config.clone();
-        (s.hwnd, s.nav, s.modes, s.hotkey, s.block_hotkey, s.correction_hotkey)
+        let fields = [s.correction_hotkey, s.selection_layout_hotkey, s.selection_case_hotkey];
+        (s.hwnd, s.nav, s.modes, s.hotkey, s.block_hotkey, fields)
     });
     show_mode(&modes, hotkey, config.switch_mode);
     ui::set_window_text(hotkey, &config.hotkey);
     ui::set_checked(block_hotkey, config.block_hotkey);
-    ui::set_window_text(correction_hotkey, &config.correction_hotkey);
+    let texts = [&config.correction_hotkey, &config.selection_layout_hotkey, &config.selection_case_hotkey];
+    for (field, text) in fields.into_iter().zip(texts) {
+        ui::set_window_text(field, text);
+    }
 
     unsafe {
         SendMessageW(nav, LB_SETCURSEL, page as usize, 0);
@@ -244,6 +254,27 @@ unsafe fn create() -> Option<Settings> {
         180, 60, font,
     );
     let correction_record_hint = label(RECORD_HINT, 132, 40, font);
+    let selection_layout_label = label("Convert the selected text to the next layout:", 252, 20, font);
+    let selection_layout_hotkey = child(
+        hotkey_field::CLASS_NAME, "", WS_TABSTOP, 0, CONTENT_X, 276, 260, 30, ID_SELECTION_LAYOUT_HOTKEY, font,
+    );
+    let selection_layout_clear = child(
+        "BUTTON", "Clear", WS_TABSTOP | BS_PUSHBUTTON as u32, 0, CONTENT_X + 268, 276, 80, 30,
+        ID_SELECTION_LAYOUT_CLEAR, font,
+    );
+    let selection_case_label = label("Invert the case of the selected text:", 320, 20, font);
+    let selection_case_hotkey = child(
+        hotkey_field::CLASS_NAME, "", WS_TABSTOP, 0, CONTENT_X, 344, 260, 30, ID_SELECTION_CASE_HOTKEY, font,
+    );
+    let selection_case_clear = child(
+        "BUTTON", "Clear", WS_TABSTOP | BS_PUSHBUTTON as u32, 0, CONTENT_X + 268, 344, 80, 30,
+        ID_SELECTION_CASE_CLEAR, font,
+    );
+    let selection_hint = label(
+        "Select text and press the hotkey: the text is copied, changed and pasted \
+         over the selection. The clipboard gets its contents back afterwards.",
+        384, 60, font,
+    );
 
     // Advanced
     let advanced_title = label("Advanced", MARGIN, 36, title_font);
@@ -252,10 +283,11 @@ unsafe fn create() -> Option<Settings> {
         WS_TABSTOP | BS_AUTOCHECKBOX as u32, 0, CONTENT_X, 68, CONTENT_W, 24, ID_BLOCK_HOTKEY, font,
     );
     let block_hotkey_hint = label(
-        "Applies to all hotkeys of the app: layout switching, the hotkeys of the layouts \
-         and the last word correction. When on, the key combination is not passed on \
-         to the active application. When off, it is passed on after the action.",
-        96, 60, font,
+        "Applies to all hotkeys of the app: layout switching, the hotkeys of the layouts, \
+         the last word correction and the selected text hotkeys. When on, the key \
+         combination is not passed on to the active application. When off, it is \
+         passed on after the action.",
+        96, 80, font,
     );
 
     // About
@@ -273,11 +305,17 @@ unsafe fn create() -> Option<Settings> {
         block_hotkey,
         layouts,
         correction_hotkey,
+        selection_layout_hotkey,
+        selection_case_hotkey,
         secondary: vec![hotkey_hint, block_hotkey_hint, correction_record_hint, version, license],
         pages: [
             vec![switcher_title, mode_label, modes[0], modes[1], modes[2], hotkey_label, hotkey, hotkey_clear, hotkey_hint],
             vec![layout_title, layouts_label, layouts],
-            vec![correction_title, correction_label, correction_hotkey, correction_clear, correction_hint, correction_record_hint],
+            vec![
+                correction_title, correction_label, correction_hotkey, correction_clear, correction_hint,
+                correction_record_hint, selection_layout_label, selection_layout_hotkey, selection_layout_clear,
+                selection_case_label, selection_case_hotkey, selection_case_clear, selection_hint,
+            ],
             vec![advanced_title, block_hotkey, block_hotkey_hint],
             vec![about_title, version, description, author, license],
         ],
@@ -315,6 +353,10 @@ pub fn hotkey_clash(hotkey: &str, owner: &config::HotkeyOwner) -> Option<String>
     let what = match user {
         config::HotkeyOwner::Main => "the layout switch hotkey on the Switcher page".to_string(),
         config::HotkeyOwner::Correction => "the last word correction hotkey on the Correction page".to_string(),
+        config::HotkeyOwner::SelectionLayout => {
+            "the selected text layout hotkey on the Correction page".to_string()
+        }
+        config::HotkeyOwner::SelectionCase => "the selected text case hotkey on the Correction page".to_string(),
         config::HotkeyOwner::Layout(id) => {
             let name = layouts::system().into_iter().find(|l| l.id == id).map_or(id, |l| l.name);
             format!("the hotkey of the layout \u{201C}{name}\u{201D}")
@@ -379,11 +421,13 @@ fn show_save_error(hwnd: HWND, err: &std::io::Error) {
     unsafe { MessageBoxW(hwnd, message.as_ptr(), caption.as_ptr(), MB_ICONERROR | MB_OK) };
 }
 
-/// The config entry of a hotkey set in this window (the common or the
-/// correction hotkey).
+/// The config entry of a hotkey set in this window (all but the layouts'
+/// own hotkeys, which are set in their dialog).
 fn hotkey_entry<'a>(config: &'a mut config::Config, owner: &config::HotkeyOwner) -> &'a mut String {
     match owner {
         config::HotkeyOwner::Correction => &mut config.correction_hotkey,
+        config::HotkeyOwner::SelectionLayout => &mut config.selection_layout_hotkey,
+        config::HotkeyOwner::SelectionCase => &mut config.selection_case_hotkey,
         _ => &mut config.hotkey,
     }
 }
@@ -391,7 +435,12 @@ fn hotkey_entry<'a>(config: &'a mut config::Config, owner: &config::HotkeyOwner)
 fn on_hotkey_cleared(owner: config::HotkeyOwner) {
     let field = SETTINGS.with_borrow(|s| {
         let s = s.as_ref()?;
-        Some(if owner == config::HotkeyOwner::Correction { s.correction_hotkey } else { s.hotkey })
+        Some(match owner {
+            config::HotkeyOwner::Correction => s.correction_hotkey,
+            config::HotkeyOwner::SelectionLayout => s.selection_layout_hotkey,
+            config::HotkeyOwner::SelectionCase => s.selection_case_hotkey,
+            _ => s.hotkey,
+        })
     });
     if let Some(field) = field {
         ui::set_window_text(field, "");
@@ -528,6 +577,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     on_hotkey_changed(lparam as HWND, config::HotkeyOwner::Correction)
                 }
                 (ID_CORRECTION_CLEAR, BN_CLICKED) => on_hotkey_cleared(config::HotkeyOwner::Correction),
+                (ID_SELECTION_LAYOUT_HOTKEY, hotkey_field::HFN_CHANGED) => {
+                    on_hotkey_changed(lparam as HWND, config::HotkeyOwner::SelectionLayout)
+                }
+                (ID_SELECTION_LAYOUT_CLEAR, BN_CLICKED) => on_hotkey_cleared(config::HotkeyOwner::SelectionLayout),
+                (ID_SELECTION_CASE_HOTKEY, hotkey_field::HFN_CHANGED) => {
+                    on_hotkey_changed(lparam as HWND, config::HotkeyOwner::SelectionCase)
+                }
+                (ID_SELECTION_CASE_CLEAR, BN_CLICKED) => on_hotkey_cleared(config::HotkeyOwner::SelectionCase),
                 (ID_MODE_FIRST..=ID_MODE_LAST, BN_CLICKED) => on_mode_changed((id - ID_MODE_FIRST) as usize),
                 (ID_BLOCK_HOTKEY, BN_CLICKED) => on_block_hotkey_changed(lparam as HWND),
                 (ID_LAYOUTS, reorder_list::RLN_CHANGED) => on_layouts_changed(lparam as HWND),

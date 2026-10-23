@@ -16,8 +16,12 @@
 //! remembers the keys of the last word, and on the hotkey they are erased
 //! with Backspace and pressed again once the window has switched to the next
 //! layout.
+//!
+//! The selection hotkeys go through the clipboard: Ctrl+C copies the
+//! selected text, it is converted and pasted over the selection with Ctrl+V,
+//! and then the clipboard gets back what it held before.
 
-use crate::{config, hotkey_field, keys, layouts, matcher::Matcher, ui, word};
+use crate::{clipboard, config, convert, hotkey_field, keys, layouts, matcher::Matcher, ui, word};
 use std::cell::RefCell;
 use std::ptr::null_mut;
 use windows_sys::Win32::{
@@ -48,6 +52,16 @@ const CORRECTION_POLL_MS: u32 = 10;
 /// (consoles, for one, may never do).
 const CORRECTION_WAIT_MS: u32 = 300;
 
+const TIMER_SELECTION: usize = 2;
+/// How often to check whether the application has copied the selection.
+const SELECTION_POLL_MS: u32 = 10;
+/// Nothing copied by then means nothing is selected.
+const SELECTION_WAIT_MS: u32 = 500;
+const TIMER_RESTORE: usize = 3;
+/// The application reads the clipboard when it gets Ctrl+V; give it this
+/// long before the previous contents are put back.
+const RESTORE_DELAY_MS: u32 = 500;
+
 /// How long a requested layout is assumed to be the current one while the
 /// target window hasn't processed the request yet.
 const PENDING_MS: u32 = 500;
@@ -65,6 +79,10 @@ enum Action {
     Layout(u32),
     /// Retype the last word in the next enabled layout.
     Correction,
+    /// Convert the selected text to the next enabled layout.
+    SelectionLayout,
+    /// Invert the case of the selected text.
+    SelectionCase,
 }
 
 /// A word waiting for its window to switch the layout.
@@ -74,6 +92,17 @@ struct Correction {
     hkl: u32,
     keys: Vec<word::Key>,
     started: u32,
+}
+
+/// Selected text being copied.
+struct Selection {
+    action: Action,
+    foreground: HWND,
+    thread: u32,
+    /// The clipboard's sequence number after we emptied it.
+    sequence: u32,
+    started: u32,
+    backup: clipboard::Backup,
 }
 
 struct Switcher {
@@ -91,6 +120,9 @@ struct Switcher {
     /// The keys of the word being typed.
     word: word::Word,
     correction: Option<Correction>,
+    selection: Option<Selection>,
+    /// The clipboard contents to put back after a paste.
+    restore: Option<clipboard::Backup>,
 }
 
 thread_local! {
@@ -105,6 +137,8 @@ thread_local! {
         series: None,
         word: word::Word::default(),
         correction: None,
+        selection: None,
+        restore: None,
     });
 }
 
@@ -167,12 +201,23 @@ fn hotkeys(config: &config::Config) -> (Vec<Vec<u32>>, Vec<Action>) {
         let hkl = u32::from_str_radix(&l.id, 16).ok()?;
         Some((keys::parse(&l.hotkey)?, Action::Layout(hkl)))
     });
-    let correction = keys::parse(&config.correction_hotkey).map(|keys| (keys, Action::Correction));
-    main.into_iter().chain(correction).chain(own).unzip()
+    let fixed = [
+        (&config.correction_hotkey, Action::Correction),
+        (&config.selection_layout_hotkey, Action::SelectionLayout),
+        (&config.selection_case_hotkey, Action::SelectionCase),
+    ]
+    .into_iter()
+    .filter_map(|(text, action)| Some((keys::parse(text)?, action)));
+    main.into_iter().chain(fixed).chain(own).unzip()
 }
 
 pub fn stop() {
     set_mouse_hook(false);
+    // Don't leave the converted text in place of the user's clipboard.
+    let (window, restore) = SWITCHER.with_borrow_mut(|s| (s.window, s.restore.take()));
+    if let Some(backup) = restore {
+        clipboard::restore(window, backup);
+    }
     let (hook, window) = SWITCHER.with_borrow_mut(|s| {
         (std::mem::replace(&mut s.keyboard_hook, null_mut()), std::mem::replace(&mut s.window, null_mut()))
     });
@@ -322,6 +367,7 @@ unsafe fn on_hotkey(index: usize, continues: bool) {
     // The config may have changed since the hotkey fired.
     match SWITCHER.with_borrow(|s| s.actions.get(index).copied()) {
         Some(Action::Correction) => start_correction(),
+        Some(action @ (Action::SelectionLayout | Action::SelectionCase)) => start_selection(action),
         Some(action) => switch_layout(action, continues),
         None => {}
     }
@@ -349,7 +395,7 @@ unsafe fn switch_layout(action: Action, continues: bool) {
                 layouts::nth_enabled(&list, index)
             }
             Action::Cycle => layouts::next_enabled(&list, s.current_layout(thread, now)),
-            Action::Correction => None,
+            Action::Correction | Action::SelectionLayout | Action::SelectionCase => None,
         }
     });
     if let Some(next) = next {
@@ -414,10 +460,10 @@ unsafe fn on_correction_timer(window: HWND) {
     retype(&correction.keys, correction.hkl, &held);
 }
 
-/// Erases as many characters as there are keys and presses the keys again
-/// in the layout `hkl`. Modifiers the user holds are released for that time,
-/// or the keys would come as shortcuts (Ctrl+Backspace erases a word).
-unsafe fn retype(keys: &[word::Key], hkl: u32, held: &[u32]) {
+/// Sends `inputs` with the modifiers the user holds released for that time,
+/// or the keys would come as shortcuts (Ctrl+Backspace erases a word,
+/// Ctrl+Shift+V is not Ctrl+V).
+unsafe fn send_released(inputs: Vec<INPUT>, held: &[u32]) {
     let modifiers: Vec<u16> =
         held.iter().filter(|&&vk| keys::is_modifier(keys::normalize(vk))).map(|&vk| vk as u16).collect();
     let modifier_flags = |vk: u16| match vk {
@@ -427,13 +473,27 @@ unsafe fn retype(keys: &[word::Key], hkl: u32, held: &[u32]) {
     // Releasing (and later pressing) Alt or Win alone opens a menu.
     let mask = modifiers.iter().any(|&vk| matches!(keys::normalize(vk as u32), keys::VK_ALT | keys::VK_WIN));
 
-    let mut inputs = Vec::new();
+    let mut all = Vec::new();
     if mask {
-        inputs.extend([key_input(VK_MASK, 0, 0), key_input(VK_MASK, 0, KEYEVENTF_KEYUP)]);
+        all.extend([key_input(VK_MASK, 0, 0), key_input(VK_MASK, 0, KEYEVENTF_KEYUP)]);
     }
     for &vk in &modifiers {
-        inputs.push(key_input(vk, 0, KEYEVENTF_KEYUP | modifier_flags(vk)));
+        all.push(key_input(vk, 0, KEYEVENTF_KEYUP | modifier_flags(vk)));
     }
+    all.extend(inputs);
+    for &vk in &modifiers {
+        all.push(key_input(vk, 0, modifier_flags(vk)));
+    }
+    if mask {
+        all.extend([key_input(VK_MASK, 0, 0), key_input(VK_MASK, 0, KEYEVENTF_KEYUP)]);
+    }
+    SendInput(all.len() as u32, all.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+}
+
+/// Erases as many characters as there are keys and presses the keys again
+/// in the layout `hkl`.
+unsafe fn retype(keys: &[word::Key], hkl: u32, held: &[u32]) {
+    let mut inputs = Vec::new();
     let back_scan = MapVirtualKeyW(VK_BACK as u32, MAPVK_VK_TO_VSC) as u16;
     for _ in keys {
         inputs.extend([key_input(VK_BACK, back_scan, 0), key_input(VK_BACK, back_scan, KEYEVENTF_KEYUP)]);
@@ -460,13 +520,104 @@ unsafe fn retype(keys: &[word::Key], hkl: u32, held: &[u32]) {
             inputs.push(key_input(VK_LSHIFT, shift_scan, KEYEVENTF_KEYUP));
         }
     }
-    for &vk in &modifiers {
-        inputs.push(key_input(vk, 0, modifier_flags(vk)));
+    send_released(inputs, held);
+}
+
+/// Presses Ctrl and the letter key `vk` (C to copy, V to paste).
+unsafe fn send_ctrl(vk: u16) {
+    let held = SWITCHER.with_borrow(|s| s.matcher.held().to_vec());
+    let ctrl_scan = MapVirtualKeyW(VK_LCONTROL as u32, MAPVK_VK_TO_VSC) as u16;
+    let scan = MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) as u16;
+    let inputs = vec![
+        key_input(VK_LCONTROL, ctrl_scan, 0),
+        key_input(vk, scan, 0),
+        key_input(vk, scan, KEYEVENTF_KEYUP),
+        key_input(VK_LCONTROL, ctrl_scan, KEYEVENTF_KEYUP),
+    ];
+    send_released(inputs, &held);
+}
+
+/// Copies the selected text of the foreground window; the rest is done once
+/// the copy shows up on the clipboard.
+unsafe fn start_selection(action: Action) {
+    let foreground = GetForegroundWindow();
+    if foreground.is_null() || SWITCHER.with_borrow(|s| s.selection.is_some()) {
+        return;
     }
-    if mask {
-        inputs.extend([key_input(VK_MASK, 0, 0), key_input(VK_MASK, 0, KEYEVENTF_KEYUP)]);
+    let window = SWITCHER.with_borrow(|s| s.window);
+    // A paste from the previous time may still be waiting for its restore;
+    // the user's contents must be back before they are saved again.
+    finish_restore(window);
+    let backup = clipboard::backup(window);
+    // Emptied, so that a copy of nothing (no selection) can be told apart.
+    clipboard::empty(window);
+    let selection = Selection {
+        action,
+        foreground,
+        thread: GetWindowThreadProcessId(foreground, null_mut()),
+        sequence: clipboard::sequence(),
+        started: GetTickCount(),
+        backup,
+    };
+    SWITCHER.with_borrow_mut(|s| {
+        s.selection = Some(selection);
+        // The text is about to change some other way than typing.
+        s.word.clear();
+    });
+    send_ctrl(b'C' as u16);
+    SetTimer(window, TIMER_SELECTION, SELECTION_POLL_MS, None);
+}
+
+/// Converts and pastes the copied selection once it is on the clipboard.
+unsafe fn on_selection_timer(window: HWND) {
+    let now = GetTickCount();
+    let ready = SWITCHER.with_borrow_mut(|s| {
+        let Some(sel) = &s.selection else { return Some(None) };
+        let copied = clipboard::sequence() != sel.sequence;
+        (copied || now.wrapping_sub(sel.started) >= SELECTION_WAIT_MS).then(|| s.selection.take())
+    });
+    // Still waiting.
+    let Some(selection) = ready else { return };
+    KillTimer(window, TIMER_SELECTION);
+    let Some(selection) = selection else { return };
+
+    let text = clipboard::text(window).filter(|t| !t.is_empty());
+    let Some(text) = text else {
+        // Nothing was selected (or it wasn't text).
+        clipboard::restore(window, selection.backup);
+        return;
+    };
+    let converted = match selection.action {
+        Action::SelectionCase => convert::invert_case(&text),
+        _ => {
+            let next = SWITCHER.with_borrow(|s| {
+                let list = layouts::switch_order(&s.config.layouts);
+                let current = s.current_layout(selection.thread, now);
+                Some((current, layouts::next_enabled(&list, current)?))
+            });
+            let Some((current, next)) = next else {
+                clipboard::restore(window, selection.backup);
+                return;
+            };
+            request_layout(selection.foreground, selection.thread, next, now);
+            convert::to_layout(&text, current, next)
+        }
+    };
+    if !clipboard::set_text(window, &converted) {
+        clipboard::restore(window, selection.backup);
+        return;
     }
-    SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+    send_ctrl(b'V' as u16);
+    SWITCHER.with_borrow_mut(|s| s.restore = Some(selection.backup));
+    SetTimer(window, TIMER_RESTORE, RESTORE_DELAY_MS, None);
+}
+
+/// Puts back the clipboard contents saved before a paste, if any.
+unsafe fn finish_restore(window: HWND) {
+    KillTimer(window, TIMER_RESTORE);
+    if let Some(backup) = SWITCHER.with_borrow_mut(|s| s.restore.take()) {
+        clipboard::restore(window, backup);
+    }
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -477,6 +628,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         WM_TIMER if wparam == TIMER_CORRECTION => {
             on_correction_timer(hwnd);
+            0
+        }
+        WM_TIMER if wparam == TIMER_SELECTION => {
+            on_selection_timer(hwnd);
+            0
+        }
+        WM_TIMER if wparam == TIMER_RESTORE => {
+            finish_restore(hwnd);
             0
         }
         WM_MASK => {
